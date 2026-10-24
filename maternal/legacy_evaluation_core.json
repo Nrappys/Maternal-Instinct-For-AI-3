@@ -1,0 +1,12 @@
+{
+  "maternal/agent.py": "145082257e555213a55cb14f4a0f03f0342f9c9b8344ef83c776cbe9903adc59",
+  "maternal/evolution.py": "9c96796d61eb9fe317fc5928ed91d5d0a420b3c55c351cbbe1482394ca508d07",
+  "maternal/environment.py": "ecb70435bc50882bbcbe2d54ed86a24fae0e801560d8850e48d8ffb2f316b6c2",
+  "additional_snapshots": [
+    {
+      "maternal/evolution.py": "b2706e970ae544f60d1da21224a7efd47caebac3155c3c1a4c2d7230054096f0",
+      "maternal/agent.py": "145082257e555213a55cb14f4a0f03f0342f9c9b8344ef83c776cbe9903adc59",
+      "maternal/environment.py": "ecb70435bc50882bbcbe2d54ed86a24fae0e801560d8850e48d8ffb2f316b6c2"
+    }
+  ]
+}

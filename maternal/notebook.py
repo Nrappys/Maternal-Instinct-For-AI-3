@@ -62,6 +62,7 @@ class _Panel:
         self.running = False
         self.closed = False
         self.delay = 0.03
+        self.show_simulation = True
         self.started_at = None
         self.log = W.Output(layout=W.Layout(max_height="160px", overflow="auto"))
         self.view = W.Image(format="png", layout=W.Layout(width="100%", max_width="1120px", height="auto"))
@@ -72,8 +73,8 @@ class _Panel:
         self.start.style.button_color = COLORS["mother"]
         self.pause = W.Button(description="Pause", disabled=True, layout=W.Layout(width="100px"))
         self.stop = W.Button(description="Stop" if preview else "Stop & save", disabled=True, layout=W.Layout(width="130px"))
-        self.pace = W.Dropdown(options=("Calm", "Flow", "Fast"), value="Flow", description="View", layout=W.Layout(width="180px"))
-        self.pace.observe(lambda change: setattr(self, "delay", {"Calm": 0.1, "Flow": 0.03, "Fast": 0.0}[change["new"]]), names="value")
+        self.pace = W.Dropdown(options=("Calm", "Flow", "Fast", "Off"), value="Flow", description="View", layout=W.Layout(width="180px"))
+        self.pace.observe(self._set_pace, names="value")
         self.start.on_click(self._start)
         self.pause.on_click(self._pause)
         self.stop.on_click(self._stop)
@@ -87,6 +88,12 @@ class _Panel:
     @property
     def active(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def _set_pace(self, change):
+        mode = change["new"]
+        self.show_simulation = mode != "Off"
+        self.delay = {"Calm": 0.1, "Flow": 0.03, "Fast": 0.0, "Off": 0.0}[mode]
+        self.view.layout.display = "" if self.show_simulation else "none"
 
     def _start(self, _):
         if self.active:
@@ -214,7 +221,8 @@ class _Panel:
             if "family" in frame:
                 population = frame.get("population", self.config.population)
                 note += f" · family {min(frame['family']+1, population)}/{population}"
-            self.view.value = world_png(world, self.title, note, frame.get("z_mother"))
+            if self.show_simulation:
+                self.view.value = world_png(world, self.title, note, frame.get("z_mother"))
             fraction = frame.get("episode_fraction", world["step"]/world["horizon"])
             self.episode.value = max(0, min(1, fraction))
             status = f"Day {world['day']}/{world['days']} · step {world['step']:,}/{world['horizon']:,} · {note}"

@@ -36,6 +36,12 @@ def device_description(config):
     return f"Device: CPU · {reason}"
 
 
+def execution_description(config):
+    workers = min(config.family_workers, config.population)
+    return (f"Family threads: {workers} · PPO shuffle: {config.ppo_shuffle_rng} · "
+            "independent agents; fitness and zero-shot remain sequential")
+
+
 class NotebookStop(Exception):
     pass
 
@@ -325,7 +331,8 @@ class TrainingPanel(_Panel):
         self.arm = W.SelectMultiple(options=tuple("ABCD"), value=tuple(arms), description="Arms") if self.batch else W.Dropdown(options=tuple("ABCD"), value=config.arm, description="Arm")
         self.seed_input = W.Text(value=", ".join(map(str, seeds or (config.seed,))), description="Seeds") if self.batch else W.BoundedIntText(value=config.seed, min=0, max=2**31-1, description="Seed")
         self.start.description = "Start batch" if self.batch else "Start training"
-        self.extra_controls.children = (self.arm, self.seed_input)
+        self.workers = W.BoundedIntText(value=config.family_workers, min=1, max=64, description="Threads")
+        self.extra_controls.children = (self.arm, self.seed_input, self.workers)
 
     def _job(self):
         self._check()
@@ -346,6 +353,7 @@ class TrainingPanel(_Panel):
         for arm, seed in jobs:
             config = copy.deepcopy(self.config)
             config.arm, config.seed = arm, seed
+            config.family_workers = self.workers.value
             config.validate()
             configs.append(config)
         for index, config in enumerate(configs):
@@ -354,6 +362,9 @@ class TrainingPanel(_Panel):
             self._emit({"kind": "log", "text": f"Job {index+1}/{len(jobs)} · arm {arm} · seed {seed}"})
             engine = Experiment(config)
             self._emit({"kind": "log", "text": device_description(engine.config)})
+            self._emit({"kind": "log", "text": execution_description(engine.config)})
+            if engine.config.ppo_shuffle_rng == "per_agent":
+                self._emit({"kind": "log", "text": "Per-agent PPO shuffle RNG differs from legacy runs. Same seed need not reproduce old results; thread speedup is not guaranteed."})
             terminal = {}
             def callback(frame):
                 if frame["kind"] == "done":
@@ -386,6 +397,7 @@ class ResumePanel(_Panel):
         path = _checkpoint_path(self.path.value)
         engine = Experiment.resume(path)
         self._emit({"kind": "log", "text": device_description(engine.config)})
+        self._emit({"kind": "log", "text": execution_description(engine.config)})
         def control():
             try:
                 self._check()

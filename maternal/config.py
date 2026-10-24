@@ -100,6 +100,8 @@ class ExperimentConfig:
     fitness_seeds: int = 5
     fitness_steps: int = 200
     device: str = "auto"
+    family_workers: int = 1
+    ppo_shuffle_rng: str = "legacy"
     world: WorldConfig = field(default_factory=WorldConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
@@ -119,6 +121,13 @@ class ExperimentConfig:
         return config
 
     def validate(self):
+        if type(self.family_workers) is not int or not 1 <= self.family_workers <= 64:
+            raise ValueError("family_workers must be an integer from 1 to 64")
+        if self.ppo_shuffle_rng not in ("legacy", "per_agent"):
+            raise ValueError("ppo_shuffle_rng must be legacy or per_agent")
+        if self.family_workers > 1:
+            # Global NumPy shuffling would depend on thread scheduling.
+            self.ppo_shuffle_rng = "per_agent"
         if self.device not in ("auto", "cuda", "cpu"):
             raise ValueError("device must be auto, cuda or cpu")
         if self.arm not in "ABCD" or len(self.arm) != 1:

@@ -54,6 +54,22 @@ class SpaceOnlyEnv(gym.Env):
         raise RuntimeError("Use FamilyWorld.step once for both agents; never call PPO.learn()")
 
 
+class AgentRolloutBuffer(RolloutBuffer):
+    """SB3 minibatches with an explicitly owned RNG, never global NumPy state."""
+
+    def get(self, batch_size=None):
+        if not self.full:
+            raise RuntimeError("Cannot sample an incomplete rollout")
+        indices = self.shuffle_rng.permutation(self.buffer_size * self.n_envs)
+        if not self.generator_ready:
+            for name in ("observations", "actions", "values", "log_probs", "advantages", "returns"):
+                setattr(self, name, self.swap_and_flatten(getattr(self, name)))
+            self.generator_ready = True
+        batch_size = batch_size or self.buffer_size * self.n_envs
+        for start in range(0, len(indices), batch_size):
+            yield self._get_samples(indices[start:start + batch_size])
+
+
 def actor_state(policy):
     return {k: v.detach().cpu().clone() for k, v in policy.state_dict().items()
             if k.startswith("mlp_extractor.policy_net.") or k.startswith("action_net.")}
@@ -101,6 +117,7 @@ class Learner:
         self.genome = {"actor": actor_state(self.model.policy), "phi": copy.deepcopy(self.phi.state_dict())}
         self.z = np.zeros(p.latent, dtype=np.float32)
         self.generator = torch.Generator(device="cpu").manual_seed(seed ^ 0x5A17)
+        self.shuffle_rng = np.random.default_rng(seed ^ 0x6B28)
         self.episode_start = True
         self.transitions = 0
         self.updates = 0
@@ -164,8 +181,11 @@ class Learner:
         if not count:
             return
         p = self.config.ppo
-        tail = RolloutBuffer(count, self.model.observation_space, self.model.action_space,
+        buffer_type = AgentRolloutBuffer if self.config.ppo_shuffle_rng == "per_agent" else RolloutBuffer
+        tail = buffer_type(count, self.model.observation_space, self.model.action_space,
                              device=self.model.device, gamma=p.gamma, gae_lambda=p.gae_lambda, n_envs=1)
+        if isinstance(tail, AgentRolloutBuffer):
+            tail.shuffle_rng = self.shuffle_rng
         for name in ("observations", "actions", "rewards", "episode_starts", "values", "log_probs"):
             setattr(tail, name, getattr(original, name)[:count].copy())
         tail.pos, tail.full = count, True
@@ -195,6 +215,7 @@ class Learner:
                   "policy": copy.deepcopy(self.model.policy.state_dict()),
                   "optimizer": copy.deepcopy(self.model.policy.optimizer.state_dict()),
                   "z": self.z.copy(), "generator": self.generator.get_state().clone(),
+                  "shuffle_rng": copy.deepcopy(self.shuffle_rng.bit_generator.state),
                   "episode_start": self.episode_start, "transitions": self.transitions,
                   "updates": self.updates, "discarded": self.discarded,
                   "n_updates": self.model._n_updates, "last_loss": self.last_loss}
@@ -209,6 +230,8 @@ class Learner:
         obj.model.policy.optimizer.load_state_dict(state["optimizer"])
         obj.z = state["z"].copy()
         obj.generator.set_state(state["generator"])
+        if "shuffle_rng" in state:
+            obj.shuffle_rng.bit_generator.state = copy.deepcopy(state["shuffle_rng"])
         for name in ("episode_start", "transitions", "updates", "discarded", "last_loss"):
             setattr(obj, name, state[name])
         obj.model._n_updates = state.get("n_updates", obj.updates * config.ppo.epochs)

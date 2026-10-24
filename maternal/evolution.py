@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import copy
@@ -97,6 +98,8 @@ class Experiment:
                          "source_hashes": source_hashes(), "created_utc": datetime.now(timezone.utc).isoformat(),
                          "status": "initialized", "validated": False, "training_started": False,
                          "runtime_device": config.device,
+                         "execution": {"family_workers": config.family_workers,
+                                       "ppo_shuffle_rng": config.ppo_shuffle_rng},
                          "entrypoint": "Jupyter Notebook", "project": "Maternal Instinct For AI #3"}
         self._manifest()
         self.generation, self.family_index = 0, 0
@@ -140,7 +143,10 @@ class Experiment:
                 m = Learner.restore(self.config, adult["learner"])
                 if self.config.arm != "D":
                     # Branches retain experience, but must not share identical action RNG streams.
-                    m.generator.manual_seed(self._seed() ^ 0x4711)
+                    branch_seed = self._seed()
+                    m.generator.manual_seed(branch_seed ^ 0x4711)
+                    if self.config.ppo_shuffle_rng == "per_agent":
+                        m.shuffle_rng = np.random.default_rng(branch_seed ^ 0x6B28)
                 body = copy.deepcopy(adult["body"])
                 source_id = body.agent_id
                 body.agent_id = f"g{self.generation}-m{slot}"
@@ -211,6 +217,79 @@ class Experiment:
                 payload["z_mother"], payload["z_child"] = family.mother.z.tolist(), family.child.z.tolist()
         callback(payload)
 
+    def _care_serial(self, callback, control):
+        for index in range(self.family_index, len(self.families)):
+            self.family_index = index
+            self.watched_family = index
+            family = self.families[index]
+            world = family.world
+            while world.t < self.config.world.horizon:
+                control()
+                observations = [world.observation(0), world.observation(1)]
+                bodies = (world.mother, world.child)
+                living = [body.alive for body in bodies]
+                choices = [learner.choose(obs) if alive else (int(Action.WAIT), None)
+                           for learner, obs, alive in zip((family.mother, family.child), observations, living)]
+                rewards, boundary = world.step((choices[0][0], choices[1][0]))
+                for who, learner in enumerate((family.mother, family.child)):
+                    if living[who]:
+                        terminal = not bodies[who].alive or (boundary and who == 0)
+                        learner.record(choices[who][1], rewards[who], world.observation(who),
+                                       terminal, learn=self.config.arm != "C", flush=boundary)
+                        self.agent_transitions += 1
+                self.joint_steps += 1
+                if world.t % 16 == 0 or boundary:
+                    within = (index + world.t/self.config.world.horizon)/self.config.population
+                    self._progress(callback, label="Lifetime learning" if self.config.arm != "C" else "Frozen policy · evolution only", fraction=within)
+            family.mother.end_context()
+            family.child.end_context()
+            self.family_index = index+1
+
+    def _family_chunk(self, index):
+        """One worker owns one family for 16 joint steps; no shared RNG or I/O."""
+        family = self.families[index]
+        world = family.world
+        steps = transitions = 0
+        for _ in range(min(16, self.config.world.horizon - world.t)):
+            observations = [world.observation(0), world.observation(1)]
+            bodies = (world.mother, world.child)
+            living = [body.alive for body in bodies]
+            choices = [learner.choose(obs) if alive else (int(Action.WAIT), None)
+                       for learner, obs, alive in zip((family.mother, family.child), observations, living)]
+            rewards, boundary = world.step((choices[0][0], choices[1][0]))
+            for who, learner in enumerate((family.mother, family.child)):
+                if living[who]:
+                    terminal = not bodies[who].alive or (boundary and who == 0)
+                    learner.record(choices[who][1], rewards[who], world.observation(who),
+                                   terminal, learn=self.config.arm != "C", flush=boundary)
+                    transitions += 1
+            steps += 1
+        if world.t == self.config.world.horizon:
+            family.mother.end_context()
+            family.child.end_context()
+        return steps, transitions
+
+    def _care_parallel(self, callback, control):
+        if self.config.ppo_shuffle_rng != "per_agent":
+            raise ValueError("Threaded care requires per-agent PPO shuffle RNG")
+        workers = min(self.config.family_workers, len(self.families))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="maternal-family") as pool:
+            while True:
+                # Pause/stop only at a barrier, when no worker is mutating a family.
+                # Checkpointing, counters, rendering and all file writes stay here.
+                control()
+                active = [i for i, f in enumerate(self.families)
+                          if f.world.t < self.config.world.horizon]
+                if not active:
+                    break
+                results = list(pool.map(self._family_chunk, active))
+                self.joint_steps += sum(steps for steps, _ in results)
+                self.agent_transitions += sum(transitions for _, transitions in results)
+                self.watched_family = active[0]
+                self.family_index = active[0]
+                self._progress(callback, label=f"Lifetime learning · {workers} threads" if self.config.arm != "C"
+                               else f"Frozen policy · {workers} threads")
+
     def run(self, callback=lambda frame: None, control=lambda: None):
         if self.phase == "finished":
             status = "extinct" if not self.candidates and self.config.arm != "D" else "completed"
@@ -225,32 +304,10 @@ class Experiment:
                     self._progress(callback, label="Building independent agents")
                     self._new_generation(control)
                 if self.phase == "care":
-                    for index in range(self.family_index, len(self.families)):
-                        self.family_index = index
-                        self.watched_family = index
-                        family = self.families[index]
-                        world = family.world
-                        while world.t < self.config.world.horizon:
-                            control()
-                            observations = [world.observation(0), world.observation(1)]
-                            bodies = (world.mother, world.child)
-                            living = [body.alive for body in bodies]
-                            choices = [learner.choose(obs) if alive else (int(Action.WAIT), None)
-                                       for learner, obs, alive in zip((family.mother, family.child), observations, living)]
-                            rewards, boundary = world.step((choices[0][0], choices[1][0]))
-                            for who, learner in enumerate((family.mother, family.child)):
-                                if living[who]:
-                                    terminal = not bodies[who].alive or (boundary and who == 0)
-                                    learner.record(choices[who][1], rewards[who], world.observation(who),
-                                                   terminal, learn=self.config.arm != "C", flush=boundary)
-                                    self.agent_transitions += 1
-                            self.joint_steps += 1
-                            if world.t % 16 == 0 or boundary:
-                                within = (index + world.t/self.config.world.horizon)/self.config.population
-                                self._progress(callback, label="Lifetime learning" if self.config.arm != "C" else "Frozen policy · evolution only", fraction=within)
-                        family.mother.end_context()
-                        family.child.end_context()
-                        self.family_index = index+1
+                    if self.config.family_workers > 1:
+                        self._care_parallel(callback, control)
+                    else:
+                        self._care_serial(callback, control)
                     self.phase = "assessment"
                     self.family_index = len(self.families)
                 if self.phase == "assessment":
@@ -389,7 +446,7 @@ class Experiment:
         disk_config = json.loads((obj.output/"config.json").read_text(encoding="utf-8"))
         if (obj.manifest.get("source_hashes") != payload["source_hashes"]
                 or any(disk_config.get(key) != payload["config"].get(key)
-                       for key in ("arm", "seed", "population", "generations", "world", "ppo"))):
+                       for key in ("arm", "seed", "population", "generations", "world", "ppo", "family_workers", "ppo_shuffle_rng"))):
             raise ValueError("Checkpoint does not match the surrounding run manifest/config")
         obj.manifest["resumed_from_output"] = payload.get("output")
         obj.manifest["runtime_device"] = obj.config.device

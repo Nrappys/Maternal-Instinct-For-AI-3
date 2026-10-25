@@ -73,6 +73,7 @@ class Body:
     consent_until: int = 0
     refused_until: int = 0
     last_move: int = -100
+    last_gather: int = -1000
     last_action: str = "WAIT"
     death_step: int | None = None
     death_cause: str = ""
@@ -112,7 +113,8 @@ class FamilyWorld:
             "safe_refusal_overrides", "help_energy", "child_need_steps", "child_hp_sum",
             "mother_hp_sum", "child_damage", "mother_damage", "child_solo_gathers",
             "child_gathers", "child_eats", "child_rests", "child_practice", "help_latency_sum",
-            "help_resolved", "child_danger_steps")}
+            "help_resolved", "child_danger_steps", "food_provisions",
+            "child_supervised_gathers", "child_independent_gathers")}
         self.events: deque = deque(maxlen=12)
         self.daily = []
         self.need_since: int | None = None
@@ -157,9 +159,34 @@ class FamilyWorld:
         return 0.0 if day < self.config.early_child_days else (0.6 if day < self.config.late_child_day else 1.0)
 
     def can_gather(self, body):
-        # A child depends on maternal food provision for the whole care episode.
-        # Becoming older within an episode never unlocks food acquisition.
-        return body.role == "mother"
+        if not body.alive:
+            return False
+        if body.role == "mother":
+            return True
+        day = self.age_day(body)
+        if day < self.config.early_child_days:
+            return False
+        if day < self.config.late_child_day:
+            return self.mother.alive and distance(body.pos, self.mother.pos) <= 1
+        return True
+
+    def food_access_stage(self, body):
+        if body.role == "mother":
+            return "adult"
+        day = self.age_day(body)
+        return "dependent" if day < self.config.early_child_days else (
+            "supervised" if day < self.config.late_child_day else "independent")
+
+    def gather_interval(self, body):
+        stage = self.food_access_stage(body)
+        if stage == "adult":
+            return 0
+        if stage != "independent":
+            return self.config.juvenile_gather_interval
+        span = max(1, self.config.days - self.config.late_child_day)
+        progress = clamp((self.age_day(body) - self.config.late_child_day)/span, 0, 1)
+        return round(self.config.late_gather_interval - progress * (
+            self.config.late_gather_interval - self.config.mature_gather_interval))
 
     def move_interval(self, body):
         interval = 1 if body.role == "mother" else (3 if self.age_day(body) < self.config.early_child_days else
@@ -195,6 +222,8 @@ class FamilyWorld:
         elif action == Action.GATHER:
             if not self.can_gather(body):
                 return
+            if self.t - body.last_gather < self.gather_interval(body):
+                return
             if body is self.child and self.carried:
                 return
             if body.pos not in self.food_sites or self.food_sites[body.pos] > self.t:
@@ -202,14 +231,19 @@ class FamilyWorld:
             if body.food >= self.config.food_capacity or self.skill_cap(body) <= 0:
                 return
             body.food += 1
+            body.last_gather = self.t
             if body is self.child:
                 self.stats["child_gathers"] += 1
+                category = "child_supervised_gathers" if self.food_access_stage(body) == "supervised" else "child_independent_gathers"
+                self.stats[category] += 1
                 if distance(body.pos, self.mother.pos) > 1 or not self.mother.alive:
                     self.stats["child_solo_gathers"] += 1
             if self.learn_skills:
                 body.forage = min(self.skill_cap(body), body.forage + self.config.skill_gain)
             body.fatigue = clamp(body.fatigue + self.config.fatigue_cost)
         elif action == Action.EAT and body.food:
+            if body.role == "child" and self.food_access_stage(body) == "dependent":
+                return
             body.food -= 1
             body.energy = clamp(body.energy + self.config.meal_energy)
             if body is self.child:
@@ -284,6 +318,15 @@ class FamilyWorld:
             elif action == Action.WARN:
                 self._signal(actor, "warn")
             elif action == Action.FEED and old_near and actor.food:
+                if (other.role == "child" and self.food_access_stage(other) != "dependent"
+                        and other.energy >= 30):
+                    if other.food < self.config.food_capacity:
+                        actor.food -= 1
+                        other.food += 1
+                        if i == 0:
+                            self.stats["food_provisions"] += 1
+                        self.event("Mother provided a meal for child to eat")
+                    continue
                 before = other.energy
                 actor.food -= 1
                 other.energy = clamp(other.energy + self.config.meal_energy)
@@ -386,6 +429,10 @@ class FamilyWorld:
                                "child_avoidance": c.avoidance, "child_hp": c.hp,
                                "child_energy": c.energy, "mother_hp": self.mother.hp,
                                "feeds": self.stats["feeds"], "forced_carries": self.stats["forced_carries"],
+                               "food_provisions": self.stats["food_provisions"],
+                               "child_food_access_stage": self.food_access_stage(c),
+                               "child_supervised_gathers": self.stats["child_supervised_gathers"],
+                               "child_independent_gathers": self.stats["child_independent_gathers"],
                                "child_solo_gathers": self.stats["child_solo_gathers"],
                                "mother_energy": self.mother.energy, "mother_fatigue": self.mother.fatigue,
                                "child_fatigue": c.fatigue, "child_stress": c.fear,
@@ -446,7 +493,10 @@ class FamilyWorld:
                 "walls": list(self.walls), "shelters": list(self.shelters),
                 "food": [(x, y, ready <= self.t) for (x, y), ready in self.food_sites.items()],
                 "hazards": list(self.hazards), "workstations": list(self.workstations),
-                "play_areas": list(self.play_areas), "events": list(self.events), "stats": dict(self.stats)}
+                "play_areas": list(self.play_areas), "events": list(self.events), "stats": dict(self.stats),
+                "child_food_access_stage": self.food_access_stage(self.child),
+                "child_can_gather": self.can_gather(self.child),
+                "child_gather_wait": max(0, self.child.last_gather + self.gather_interval(self.child) - self.t)}
 
     def summary(self):
         return {**self.stats, "steps": self.t, "mother_alive": int(self.mother.alive),
@@ -459,7 +509,8 @@ class FamilyWorld:
                 "child_avoidance": self.child.avoidance,
                 "child_health_mean": self.stats["child_hp_sum"]/max(1, self.t),
                 "mother_health_mean": self.stats["mother_hp_sum"]/max(1, self.t),
-                "child_food_dependent": int(self.child.role == "child"),
+                "child_food_dependent": int(self.food_access_stage(self.child) in ("dependent", "supervised")),
+                "child_food_access_stage": self.food_access_stage(self.child),
                 "child_orphan_steps": (max(0, (self.child.death_step if self.child.death_step is not None else self.t)
                                           - self.mother.death_step) if self.mother.death_step is not None else 0),
                 "child_died_after_mother": int(self.mother.death_step is not None and self.child.death_step is not None
@@ -494,12 +545,16 @@ def demo_action(world: FamilyWorld, who: int, style="appropriate"):
         return Action.WAIT
     if who == 0 and style == "appropriate":
         return reference_mother_action(world)
-    if b.energy < 65 and b.food and (b.energy < 40 or who == 1):
+    if (b.energy < 65 and b.food and (b.energy < 40 or who == 1)
+            and (b.role == "mother" or world.skill_cap(b) > 0)):
         return Action.EAT
     if who == 1:
         if b.fatigue > 60:
             return Action.REST
         if b.energy < 45:
+            if world.can_gather(b):
+                target = min(world.food_sites, key=lambda p: distance(b.pos, p))
+                return Action.GATHER if b.pos == target else path_action(world, b.pos, target)
             return Action.CALL
         if world.skill_cap(b) == 0 or b.fear > 60 or (other.alive and other.signal == "offer"):
             return Action.ACCEPT
@@ -557,7 +612,8 @@ def reference_mother_action(world: FamilyWorld):
     if approaching_danger and not danger:
         return Action.WARN if distance(mother.pos, child.pos) <= world.config.hearing else path_action(world, mother.pos, child.pos)
     can_eat_alone = world.skill_cap(child) > 0 and child.food > 0
-    needs_food = child.energy < (50 if world.skill_cap(child) == 0 else 30) and not can_eat_alone
+    needs_food = (child.energy < (30 if world.food_access_stage(child) == "independent" else 50)
+                  and not can_eat_alone)
     if needs_food and mother.food:
         return Action.FEED if near else path_action(world, mother.pos, child.pos)
     if danger or (child.fatigue > 70 and child.pos not in world.shelters):

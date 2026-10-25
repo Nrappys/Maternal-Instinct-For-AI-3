@@ -8,8 +8,8 @@ import os
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ID = "maternal-instinct-3"
-OUTPUT_ROOT = ROOT / "outputs" / "full_lifetime"
-PROTOCOL = "maternal-house-v2.2-dependent-child"
+OUTPUT_ROOT = ROOT / "outputs" / "2_model"
+PROTOCOL = "maternal-house-v2.3-growing-child"
 
 
 def available_cpu_count():
@@ -44,6 +44,9 @@ class WorldConfig:
     days: int = 20
     early_child_days: int = 7
     late_child_day: int = 14
+    juvenile_gather_interval: int = 40
+    late_gather_interval: int = 20
+    mature_gather_interval: int = 4
     vision: int = 2
     hearing: int = 4
     food_capacity: int = 2
@@ -166,6 +169,10 @@ class ExperimentConfig:
             raise ValueError("days and steps_per_day must be positive")
         if not 0 < self.world.early_child_days < self.world.late_child_day:
             raise ValueError("Require 0 < early_child_days < late_child_day")
+        if not 1 <= self.world.mature_gather_interval <= self.world.late_gather_interval:
+            raise ValueError("Require 1 <= mature_gather_interval <= late_gather_interval")
+        if self.world.juvenile_gather_interval < self.world.late_gather_interval:
+            raise ValueError("juvenile_gather_interval must be >= late_gather_interval")
         # Caregiving evaluation always covers the same lifetime as training.
         # The evaluation budget follows this configuration's episode clock.
         self.eval_steps = self.world.horizon

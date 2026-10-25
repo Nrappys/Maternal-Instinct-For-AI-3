@@ -42,7 +42,7 @@ def standardize_body(body, skills=None):
 
 def fitness_probe(learner, body, config, control=lambda: None, on_step=lambda: None, as_adult=True):
     # Isolated readiness probe AFTER childhood, with adult abilities unlocked.
-    # Never gives the live dependent child access to food during its care episode.
+    # Probe adulthood separately; live childhood still follows its age gates.
     scores = []
     for seed in range(config.fitness_seeds):
         control()
@@ -69,7 +69,7 @@ def fitness_probe(learner, body, config, control=lambda: None, on_step=lambda: N
     return sum(scores)/len(scores)
 
 
-EVALUATION_PROTOCOL = "full_lifetime_care_v3_dependent_child"
+EVALUATION_PROTOCOL = "full_lifetime_care_v4_growing_child"
 CARE_POLICIES = ("learned", "no_help", "appropriate_help", "always_help")
 
 
@@ -161,8 +161,8 @@ def apply_scenario_events(world, scenario):
         c.energy, c.signal, c.refused_until = 70, "refuse", meta["end"]
         world.carried = False
     elif scenario == "self_eating":
-        # One provided meal tests eating without unnecessary intervention;
-        # it does not unlock food acquisition or continued independent survival.
+        # One provided meal tests eating without unnecessary intervention.
+        # Independent gathering still follows the same age/cooldown rules.
         c.pos, c.energy, c.food = next(iter(world.food_sites)), 45, 1
         world.carried = False
     elif scenario == "mother_loss":
@@ -195,9 +195,12 @@ def benchmark_child(world, scenario):
     if (world.mother.alive and world.mother.signal == "offer" and distance(c.pos, world.mother.pos) <= 1
             and c.refused_until <= world.t and (c.fatigue > 70 or c.fear > 60)):
         return Action.ACCEPT
-    if c.food and c.energy < 65:
+    if c.food and c.energy < 65 and world.skill_cap(c) > 0:
         return Action.EAT
     if c.energy < 45:
+        if world.can_gather(c):
+            target = min(world.food_sites, key=lambda pos: distance(c.pos, pos))
+            return Action.GATHER if c.pos == target else path_action(world, c.pos, target)
         return Action.CALL
     if world.skill_cap(c) == 0:
         if c.fatigue > 60:
@@ -270,7 +273,7 @@ def run_scenario(learner, body, config, scenario, seed, intervention="normal", c
         counts["appropriate_help_attempts"] += int(near and c.alive and suitable)
         counts["unnecessary_help_attempts"] += int(near and c.alive and social and not suitable)
         counts["unserved_need_steps"] += int(opportunity and not suitable and not ongoing_help and not can_eat_alone)
-        before = world.stats["feeds"] + world.stats["soothes"] + world.stats["forced_carries"]
+        before = world.stats["feeds"] + world.stats["food_provisions"] + world.stats["soothes"] + world.stats["forced_carries"]
         carried, gathers = world.carried, world.stats["child_solo_gathers"]
         # Calendar age continues after death, so later-stage means include failures.
         age = step/world.config.steps_per_day
@@ -278,7 +281,7 @@ def run_scenario(learner, body, config, scenario, seed, intervention="normal", c
             "middle_child" if age < config.world.late_child_day else "late_child")
         world.step((action, benchmark_child(world, scenario)))
         on_step()
-        after = world.stats["feeds"] + world.stats["soothes"] + world.stats["forced_carries"]
+        after = world.stats["feeds"] + world.stats["food_provisions"] + world.stats["soothes"] + world.stats["forced_carries"]
         if (step >= world.care_test["onset"] and first_help is None
                 and (after > before or (world.carried and not carried))):
             first_help = step-world.care_test["onset"]+1
@@ -502,7 +505,8 @@ def a0_report(run_directories, destination, split="monitor", skills="matched"):
              ("unnecessary_help_attempts", "safe_refusal_overrides", "early_child_health_mean",
               "middle_child_health_mean", "late_child_health_mean"),
              ("early_child_need_steps", "middle_child_need_steps", "late_child_need_steps",
-              "challenge_need_resolved_day", "appropriate_help_attempts"))
+              "challenge_need_resolved_day", "appropriate_help_attempts"),
+             ("food_provisions", "child_supervised_gathers", "child_independent_gathers", "child_eats"))
     summaries, names = [], []
     rng = np.random.default_rng(20261024)
     for page, metrics in enumerate(pages):

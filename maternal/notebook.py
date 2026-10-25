@@ -316,6 +316,8 @@ class BalancePanel(_Panel):
                 row = {"scenario": scenario, "care_policy": policy, "test_seeds": len(selected)}
                 for metric in ("child_alive", "mother_alive", "both_alive", "child_health_mean", "child_need_steps",
                                "child_orphan_steps", "child_died_after_mother", "orphaned_child_alive_at_end",
+                               "food_provisions", "child_supervised_gathers", "child_independent_gathers",
+                               "early_child_health_mean", "middle_child_health_mean", "late_child_health_mean",
                                "mother_work_steps", "unnecessary_help_attempts", "safe_refusal_overrides"):
                     row[metric] = sum(item[metric] for item in selected)/len(selected)
                 summary.append(row)
@@ -397,7 +399,7 @@ class TrainingPanel(_Panel):
 class ResumePanel(_Panel):
     def __init__(self, config):
         super().__init__("Resume a saved run", config)
-        self.path = W.Text(description="Checkpoint", placeholder="outputs/full_lifetime/run_.../models/latest.pt", layout=W.Layout(width="100%"))
+        self.path = W.Text(description="Checkpoint", placeholder="outputs/2_model/run_.../models/latest.pt", layout=W.Layout(width="100%"))
         self.extra_controls.children = (self.path,)
         self.start.description = "Resume training"
 
@@ -433,7 +435,7 @@ class FrozenModelPanel(_Panel):
         super().__init__("Frozen model · new situation", config)
         self.start.description = "Show model"
         self.stop.description = "Stop viewing"
-        self.path = W.Text(description="Checkpoint", placeholder="outputs/full_lifetime/run_.../models/gen_000.pt", layout=W.Layout(width="100%"))
+        self.path = W.Text(description="Checkpoint", placeholder="outputs/2_model/run_.../models/gen_000.pt", layout=W.Layout(width="100%"))
         self.phase = W.Dropdown(options=("A0", "A1", "A2"), value="A0", description="Phase")
         from .evaluation import SCENARIOS
         self.scenario = W.Dropdown(options=SCENARIOS, value="hungry", description="Scenario", layout=W.Layout(width="350px"))
@@ -479,7 +481,7 @@ class EvaluationPanel(_Panel):
         super().__init__("Frozen evaluation", config)
         self.start.description = "Start evaluation"
         self.stop.description = "Stop evaluation"
-        self.path = W.Text(description="Checkpoint", placeholder="outputs/full_lifetime/run_.../models/gen_000.pt", layout=W.Layout(width="100%"))
+        self.path = W.Text(description="Checkpoint", placeholder="outputs/2_model/run_.../models/gen_000.pt", layout=W.Layout(width="100%"))
         from .evaluation import INTERVENTIONS
         self.interventions = W.SelectMultiple(options=INTERVENTIONS, value=("normal",), description="Conditions", layout=W.Layout(width="100%", height="120px"))
         self.split = W.Dropdown(options=("monitor", "holdout"), value="monitor", description="Test split")

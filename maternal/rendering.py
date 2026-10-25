@@ -103,6 +103,9 @@ def world_png(world, title="Grid World", note="", z_mother=None):
     work_steps = int(world.get("stats", {}).get("mother_work_steps", 0))
     work_reward = world.get("stats", {}).get("mother_work_reward", 0)
     text((32, 672), f"Work: {work_steps:,} steps / reward {work_reward:.2f}", 13, c["muted"])
+    stage = world.get("child_food_access_stage", "unknown")
+    wait = world.get("child_gather_wait", 0)
+    text((714, 590), f"Child food: {stage} / gather wait {wait}", 13, c["muted"])
 
     for index, (role, label) in enumerate((("mother", "Mother"), ("child", "Child"))):
         body, top = world[role], 128 + index * 236

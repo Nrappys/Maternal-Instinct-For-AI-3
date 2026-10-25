@@ -69,7 +69,7 @@ def load_checkpoint(path):
     """Only load local checkpoints created by this project, never untrusted .pt files."""
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if payload.get("schema") != 1 or payload.get("protocol") != PROTOCOL:
-        raise ValueError("Checkpoint uses different world rules. Old unbalanced models cannot resume or be pooled with balanced runs; keep their recorded results separate.")
+        raise ValueError("Checkpoint uses different world rules. Keep older dependent-child checkpoints with their original source; start a new growing-child run in outputs/2_model.")
     return payload
 
 

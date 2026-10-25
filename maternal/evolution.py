@@ -103,6 +103,8 @@ class Experiment:
                                        "backend": config.execution_backend,
                                        "parallel_zero_shot": config.parallel_zero_shot,
                                        "process_chunk_steps": config.process_chunk_steps},
+                         "experiment": "Model A only: rewarded PPO + Baldwinian inheritance; A0-only frozen evaluation",
+                         "evaluation_phases": ["A0"], "inheritance": "genome only; fresh optimizer and memory at parenthood",
                          "entrypoint": "Jupyter Notebook", "project": "Maternal Instinct For AI #3"}
         self._manifest()
         self.generation, self.family_index = 0, 0
@@ -152,9 +154,9 @@ class Experiment:
                     # Reuse model/optimizer allocations instead of rebuilding PPO.
                     m = previous_families[slot].mother
                 else:
-                    m = Learner.restore(self.config, adult["learner"])
+                    m = Learner(self.config, self._seed(), adult["learner"]["genome"])
                 if self.config.arm != "D":
-                    # Branches retain experience, but must not share identical action RNG streams.
+                    # Selected offspring restart from inherited genomes, never childhood learned weights.
                     branch_seed = self._seed()
                     m.generator.manual_seed(branch_seed ^ 0x4711)
                     if self.config.ppo_shuffle_rng == "per_agent":
@@ -168,14 +170,15 @@ class Experiment:
                 # Consent/carry are relations to a former partner, not inherited physiology.
                 body.consent_until = body.refused_until = body.signal_until = 0
                 body.signal = "quiet"
-                body.last_move = -100
+                body.last_move, body.last_gather = -100, -1000
                 m.end_context()
-                if self.config.arm == "D":
+                if self.config.arm in ("A", "D"):
+                    body.forage, body.avoidance = 0.5, 0.3
                     body.hp, body.energy, body.fatigue, body.cold, body.fear = 100, 70, 0, 0, 0
                     body.death_step, body.death_cause = None, ""
                     body.hunger_steps = body.exhaustion_steps = body.stress_steps = 0
                     body.age_steps = self.config.world.horizon
-                    body.food = 1
+                    body.food, body.maternal_food = 1, 0
                     m.z[:] = 0
             genome = m.genome
             if self.config.arm != "D":
@@ -183,7 +186,7 @@ class Experiment:
             c = Learner(self.config, self._seed(), genome)
             child_body = Body(f"g{self.generation+1}-c{slot}", parent_id=body.agent_id,
                               root_id=body.root_id, generation=self.generation+1)
-            world = FamilyWorld(self.config.world, self._seed(), body, child_body)
+            world = FamilyWorld(self.config.world, self._seed(), body, child_body, care_rewards=True)
             self.families.append(Family(world, m, c))
             self.starts.append(m.state(include_buffer=False))
             self.start_bodies.append(copy.deepcopy(world.mother))
@@ -207,7 +210,7 @@ class Experiment:
         elif self.phase == "assessment":
             within = 0.80+0.05*fraction
         elif self.phase == "evaluation":
-            within = 0.85+0.14*(self.active_eval_phase+fraction)/3
+            within = 0.85+0.14*(self.active_eval_phase+fraction)
         elif self.phase == "selection":
             within = 0.99
         else:
@@ -374,7 +377,7 @@ class Experiment:
                     # Same sampled mother indices in all phases; evaluation initialization is RNG-isolated.
                     sample = sample_unique([(f.mother, f.world.mother) for f in self.families],
                                            self.config.eval_candidates, self.config.seed+self.generation*7919+900_000)
-                    for phase_index, phase in enumerate(("A0", "A1", "A2")):
+                    for phase_index, phase in enumerate(("A0",)):
                         self.active_eval_phase = phase_index
                         records = []
                         for index, family in enumerate(self.families):

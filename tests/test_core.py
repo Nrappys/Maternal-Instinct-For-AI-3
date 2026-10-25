@@ -85,20 +85,92 @@ class WorldInvariants(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             world.step((Action.WAIT, Action.WAIT))
 
-    def test_work_requires_desk_and_is_mother_only(self):
+    def test_parental_reward_is_training_only_and_tracks_child_welfare(self):
+        train = FamilyWorld(seed=1, care_rewards=True)
+        frozen = FamilyWorld(seed=1, care_rewards=False)
+        train_rewards, _ = train.step((Action.WAIT, Action.WAIT))
+        frozen_rewards, _ = frozen.step((Action.WAIT, Action.WAIT))
+        self.assertGreater(train.stats["mother_care_reward"], 0)
+        self.assertEqual(frozen.stats["mother_care_reward"], 0)
+        self.assertAlmostEqual(train_rewards[0]-frozen_rewards[0], train.stats["mother_care_reward"])
+        self.assertEqual(train_rewards[1], frozen_rewards[1])
+        self.assertEqual(train.child.hp, frozen.child.hp)
+
+    def test_food_relief_requires_actual_maternal_help_and_a_need(self):
+        hungry = FamilyWorld(seed=1, care_rewards=True)
+        hungry.child.energy = 20
+        hungry.step((Action.FEED, Action.WAIT))
+        self.assertAlmostEqual(hungry.stats["care_reward_food_relief"], hungry.config.care_food_relief_reward)
+        full = FamilyWorld(seed=1, care_rewards=True)
+        full.child.energy = 90
+        full.step((Action.FEED, Action.WAIT))
+        self.assertEqual(full.stats["care_reward_food_relief"], 0)
+        distant = FamilyWorld(seed=1, care_rewards=True)
+        distant.child.pos = (6, 0)
+        distant.child.energy = 20
+        distant.step((Action.FEED, Action.WAIT))
+        self.assertEqual(distant.stats["care_reward_food_relief"], 0)
+
+    def test_provision_only_earns_relief_when_child_eats_maternal_food(self):
+        world = FamilyWorld(seed=1, care_rewards=True)
+        world.child.age_steps = 7*world.config.steps_per_day
+        world.child.energy = 40
+        world.step((Action.FEED, Action.WAIT))
+        self.assertEqual(world.child.maternal_food, 1)
+        self.assertEqual(world.stats["care_reward_food_relief"], 0)
+        world.step((Action.WAIT, Action.EAT))
+        self.assertEqual(world.child.maternal_food, 0)
+        self.assertGreater(world.stats["care_reward_food_relief"], 0)
+        own_meal = FamilyWorld(seed=1, care_rewards=True)
+        own_meal.child.age_steps = 7*own_meal.config.steps_per_day
+        own_meal.child.energy, own_meal.child.food = 20, 1
+        own_meal.step((Action.WAIT, Action.EAT))
+        self.assertEqual(own_meal.stats["care_reward_food_relief"], 0)
+
+    def test_soothing_reward_requires_actual_fear_relief_above_threshold(self):
+        for fear, rewarded in ((85, True), (20, False)):
+            world = FamilyWorld(seed=1, care_rewards=True)
+            world.child.fear = fear
+            world.step((Action.SOOTHE, Action.WAIT))
+            self.assertEqual(world.stats["care_reward_fear_relief"] > 0, rewarded)
+
+    def test_small_maintenance_and_unmet_needs_are_logged_separately(self):
+        world = FamilyWorld(seed=1, care_rewards=True)
+        world.child.energy = 10
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertLessEqual(world.stats["care_reward_maintenance"], .001)
+        self.assertLess(world.stats["care_reward_unmet_need"], 0)
+        self.assertAlmostEqual(world.stats["mother_care_reward"], sum(
+            value for key, value in world.stats.items() if key.startswith("care_reward_")))
+
+    def test_survival_bonus_only_at_full_episode_boundary(self):
+        world = FamilyWorld(seed=1, care_rewards=True)
+        world.t = world.config.horizon-2
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertEqual(world.stats["care_reward_survival"], 0)
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertAlmostEqual(world.stats["care_reward_survival"], world.config.care_survival_bonus)
+
+    def test_child_death_penalty_applies_once_to_living_mother(self):
+        world = FamilyWorld(seed=1, care_rewards=True)
+        world.child.energy, world.child.hp = 0, .01
+        world.child.hunger_steps = world.config.neglect_grace
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertLess(world.stats["mother_care_reward"], -world.config.care_death_penalty)
+        previous = world.stats["mother_care_reward"]
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertEqual(world.stats["mother_care_reward"], previous)
+
+    def test_new_protocol_accepts_only_model_a(self):
+        for arm in ("B", "C", "D"):
+            with self.assertRaises(ValueError):
+                ExperimentConfig.profile(arm=arm)
+
+    def test_care_only_has_no_work_action_or_desk(self):
         world = FamilyWorld(seed=3)
-        before = world.mother.fatigue
-        world.mother.pos = next(iter(world.workstations))
-        world.child.pos = world.mother.pos
-        rewards, _ = world.step((Action.WORK, Action.WORK))
-        self.assertEqual(world.stats["mother_work_steps"], 1)
-        self.assertAlmostEqual(world.stats["mother_work_reward"], world.config.work_reward)
-        self.assertGreater(world.mother.fatigue, before)
-        self.assertEqual(world.work_bonus, [world.config.work_reward, 0])
-        world.mother.pos = (0, 0)
-        world.step((Action.WORK, Action.WAIT))
-        self.assertEqual(world.stats["mother_work_steps"], 1)
-        self.assertEqual(world.work_bonus, [0, 0])
+        self.assertNotIn("WORK", Action.__members__)
+        self.assertEqual(world.workstations, set())
+        self.assertFalse(hasattr(world.config, "work_reward"))
 
     def test_home_food_is_always_stocked_and_has_no_random_gather_failure(self):
         world = FamilyWorld(seed=4)
@@ -128,10 +200,10 @@ class WorldInvariants(unittest.TestCase):
     def test_new_features_are_visible_and_social_block_keeps_station_channels(self):
         from maternal.environment import CUE_SLICE, LOCAL_CHANNELS
         world = FamilyWorld(seed=6)
-        world.mother.pos = next(iter(world.workstations))
+        world.mother.pos = (1, 2)
         obs = world.observation(0)
         center = CUE_SLICE.stop + 12*LOCAL_CHANNELS
-        self.assertEqual(obs[center+5], 1)
+        self.assertEqual(obs[center+5], 0)
         self.assertEqual(len(obs), OBS_SIZE)
         self.assertEqual(world.child.cold, 0)
 

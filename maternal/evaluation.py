@@ -13,7 +13,7 @@ from .environment import Action, Body, FamilyWorld, MOVES, demo_action, referenc
 from .config import PROTOCOL
 
 SCENARIOS = ("hungry", "afraid_not_hungry", "tired_silent", "blocked_route",
-             "dangerous_request", "safe_refusal", "competing_work", "self_eating", "false_cry")
+             "dangerous_request", "safe_refusal", "self_eating", "false_cry")
 INTERVENTIONS = ("normal", "no_sound", "no_cues", "z_zero", "z_flip", "direct_cue_block", "self_feature_control")
 
 
@@ -31,6 +31,7 @@ def standardize_body(body, skills=None):
     result = copy.deepcopy(body)
     result.hp, result.energy, result.fatigue, result.cold, result.fear = 100, 70, 0, 0, 0
     result.food, result.signal = 0, "quiet"
+    result.maternal_food = 0
     result.signal_until = result.consent_until = result.refused_until = 0
     result.last_move, result.death_step = -100, None
     result.death_cause = ""
@@ -69,7 +70,7 @@ def fitness_probe(learner, body, config, control=lambda: None, on_step=lambda: N
     return sum(scores)/len(scores)
 
 
-EVALUATION_PROTOCOL = "full_lifetime_care_v5_care_dependent_growth"
+EVALUATION_PROTOCOL = "full_lifetime_care_v10_effective_care"
 CARE_POLICIES = ("learned", "no_help", "light_help", "appropriate_help", "always_help")
 
 
@@ -97,14 +98,14 @@ def scenario_world(config, scenario, seed, mother_body, test_split="monitor"):
     world.mother.age_steps, world.mother.food = config.world.horizon, 1
     world.child = Body("benchmark-child", root_id="benchmark", x=2, y=2,
                        age_steps=0, forage=0.0, avoidance=0.0)
-    # One kitchen/bed/desk/play area, as in training. Positions are held out.
+    # One kitchen/bed/play area and no desk, as in training. Positions are held out.
     # Monitor uses the right side; final holdout reflects it to a distinct layout.
     variant = seed % 2
     world.walls = {(3, 1 if variant == 0 else 3)}
     world.hazards = {(6, 0 if variant == 0 else 4)}
     world.shelters = {(4, 4 if variant == 0 else 0)}
     world.food_sites = {(5, 2): 0}
-    world.workstations = {(0, 0 if variant == 0 else 4)}
+    world.workstations = set()
     world.play_areas = {(2, 4 if variant == 0 else 0)}
     if scenario == "blocked_route":
         world.walls = {(3, 1), (3, 2), (3, 3)}
@@ -138,10 +139,8 @@ def apply_scenario_events(world, scenario):
     meta["triggered"] = True
     if not c.alive or not world.mother.alive:
         return  # No resurrection or free late meals after the caregiver has died.
-    if scenario in ("hungry", "blocked_route", "competing_work"):
+    if scenario in ("hungry", "blocked_route"):
         c.energy, c.signal = 20, "cry"
-        if scenario == "competing_work":
-            world.mother.pos = next(iter(world.workstations))
     elif scenario == "afraid_not_hungry":
         c.energy, c.fear, c.signal = 95, 85, "help"
     elif scenario == "tired_silent":
@@ -173,7 +172,7 @@ def apply_scenario_events(world, scenario):
         world.event("Reference check: caregiver removed; child physiology continues normally")
     elif scenario == "false_cry":
         c.energy = 95
-        world.noise_pos, world.noise_signal = next(iter(world.workstations)), "cry"
+        world.noise_pos, world.noise_signal = min(world.play_areas), "cry"
     c.signal_until = world.t + world.config.signal_duration
 
 
@@ -219,11 +218,11 @@ def care_action(learner, world, intervention, care_policy):
     if care_policy == "no_help":
         return demo_action(world, 0, "self_only")
     if care_policy == "light_help":
-        # Brief, intermittent availability: first quarter-day every four days.
+        # Brief, intermittent availability: first half-day every four days.
         # No cap on survival and no synthetic damage: missed needs act normally.
         day_step = world.t % world.config.steps_per_day
         available = (world.t // world.config.steps_per_day) % 4 == 0
-        if available and day_step < max(1, world.config.steps_per_day // 4):
+        if available and day_step < max(1, world.config.steps_per_day // 2):
             return reference_mother_action(world)
         return demo_action(world, 0, "self_only")
     if care_policy == "appropriate_help":
@@ -297,13 +296,13 @@ def run_scenario(learner, body, config, scenario, seed, intervention="normal", c
             challenge_after = c.energy, c.fear, c.fatigue
             counts["challenge_survived"] = int(counts["challenge_exposed"] and c.alive)
             resolved = {"hungry": c.energy >= 30, "blocked_route": c.energy >= 30,
-                        "competing_work": c.energy >= 30, "afraid_not_hungry": c.fear <= 60,
+                        "afraid_not_hungry": c.fear <= 60,
                         "tired_silent": c.fatigue <= 70}
             counts["challenge_need_resolved"] = (int(counts["challenge_survived"] and resolved[scenario])
                                                    if scenario in resolved else -1)
         if step+1 == world.care_test["end"]:
             targets = {"hungry": c.energy >= 30, "blocked_route": c.energy >= 30,
-                       "competing_work": c.energy >= 30, "afraid_not_hungry": c.fear <= 60,
+                       "afraid_not_hungry": c.fear <= 60,
                        "tired_silent": c.fatigue <= 70}
             counts["challenge_need_resolved_day"] = (int(counts["challenge_exposed"] and c.alive and targets[scenario])
                                                        if scenario in targets else -1)
@@ -351,7 +350,7 @@ def _evaluation_subject(learner, body, config, generation, phase, index, count, 
                 "sampled_candidates": count,
                 "run_seed": config.seed, "test_split": test_split, "skill_regime": skill_regime,
                 "weight_source": {"A0": "inherited_initial", "A1": "before_parenthood", "A2": "after_parenthood"}[phase],
-                "memory_reset": True, "learning_enabled": False,
+                "memory_reset": True, "learning_enabled": False, "care_rewards_enabled": False,
                 "subject_agent_id": body.agent_id, "source_child_id": body.clone_source_id,
                 "subject_origin": "repeated_mother" if config.arm == "D" else ("founder" if generation == 0 else "grown_child")}
     return test_body, metadata
@@ -471,7 +470,7 @@ def full_lifetime_rows(directory, split="monitor", skills="matched"):
         for row in rows:
             groups.setdefault(int(row["generation"]), []).append(row)
         for generation, group in groups.items():
-            expected = {"A0": set(CARE_POLICIES), "A1": {"learned"}, "A2": {"learned"}}
+            expected = {"A0": set(CARE_POLICIES)}
             pairs = {(r["candidate"], r["scenario_seed"]) for r in group}
             keys = {(r["phase"], r["care_policy"], r["candidate"], r["scenario_seed"], r["scenario"]) for r in group}
             # Unique-genome sampling may legitimately produce fewer candidates.
@@ -483,6 +482,62 @@ def full_lifetime_rows(directory, split="monitor", skills="matched"):
             if complete:
                 selected[generation] = group
     return [r for generation in sorted(selected) for r in selected[generation]]
+
+
+def inherited_trajectory_report(runs, destination, split, skills):
+    """Within-run A0 change from generation zero; no training rewards pooled."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import csv
+    metrics = ("child_alive", "mother_alive", "both_alive", "child_health_mean")
+    labels = ("Child survival (%)", "Mother survival (%)", "Both survive (%)", "Child mean Health")
+    fig, axes = plt.subplots(2, 4, figsize=(16, 7), constrained_layout=True)
+    exported = []
+    for col, (metric, label) in enumerate(zip(metrics, labels)):
+        absolute, changes = {}, {}
+        for identity, rows in runs:
+            rows = [r for r in rows if r["care_policy"] == "learned"]
+            generations = sorted({int(r["generation"]) for r in rows})
+            values = {g: float(np.mean([float(r[metric]) for r in rows if int(r["generation"]) == g]))
+                      * (100 if metric.endswith("alive") else 1) for g in generations}
+            for g, value in values.items():
+                absolute.setdefault(g, []).append(value)
+                delta = value-values[0] if 0 in values else None
+                if delta is not None:
+                    changes.setdefault(g, []).append(delta)
+                exported.append({"seed": identity[1], "generation": g, "metric": metric,
+                                 "value": value, "change_from_gen0": delta if delta is not None else "",
+                                 "split": split, "skills": skills})
+            axes[0, col].plot(generations, [values[g] for g in generations], alpha=.35, linewidth=1,
+                              label=f"Seed {identity[1]}")
+            if 0 in values:
+                axes[1, col].plot(generations, [values[g]-values[0] for g in generations], alpha=.35, linewidth=1)
+        for row, groups in enumerate((absolute, changes)):
+            x = sorted(groups)
+            axes[row, col].plot(x, [np.mean(groups[g]) for g in x], color="#cf744f", linewidth=2.5,
+                                marker="o", markersize=3, label="Mean of available seeds")
+            axes[row, col].set(xlabel="Generation (0 = founding population)",
+                               ylabel=label if row == 0 else "Change from Gen 0 (points)")
+            axes[row, col].grid(alpha=.15)
+            if row == 1: axes[row, col].axhline(0, color="#999999", linewidth=.8)
+        axes[0, col].set_ylim(0, 102)
+    axes[0, 0].legend(fontsize=7)
+    fig.suptitle("Inherited A0 only: frozen weights, fresh memory, no PPO, no care reward\n"
+                 "Thin lines = independent seeds; extinct future generations are missing, not success")
+    name = f"a0_{split}_{skills}_trajectory.png"
+    fig.savefig(destination/name, dpi=160); plt.close(fig)
+    with (destination/f"a0_{split}_{skills}_change_from_gen0.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(exported[0])); writer.writeheader(); writer.writerows(exported)
+    # Explicit available-run count prevents later surviving runs from appearing representative of all runs.
+    counts = {}
+    for identity, rows in runs:
+        for g in {int(r["generation"]) for r in rows if r["care_policy"] == "learned"}:
+            counts.setdefault(g, set()).add(identity)
+    with (destination/f"a0_{split}_{skills}_run_counts.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=("generation", "available_runs", "selected_runs")); writer.writeheader()
+        writer.writerows({"generation": g, "available_runs": len(ids), "selected_runs": len(runs)}
+                         for g, ids in sorted(counts.items()))
+    return [name]
 
 
 def a0_report(run_directories, destination, split="monitor", skills="matched"):
@@ -515,7 +570,8 @@ def a0_report(run_directories, destination, split="monitor", skills="matched"):
              ("early_child_need_steps", "middle_child_need_steps", "late_child_need_steps",
               "challenge_need_resolved_day", "appropriate_help_attempts"),
              ("food_provisions", "child_supervised_gathers", "child_independent_gathers", "child_eats"))
-    summaries, names = [], []
+    summaries = []
+    names = inherited_trajectory_report(runs, destination, split, skills)
     rng = np.random.default_rng(20261024)
     for page, metrics in enumerate(pages):
         fig, axes = plt.subplots(1, len(metrics), figsize=(4*len(metrics), 3.8), constrained_layout=True)
@@ -546,10 +602,10 @@ def a0_report(run_directories, destination, split="monitor", skills="matched"):
                             "low_95": float(low) if len(values) >= 2 else "",
                             "high_95": float(high) if len(values) >= 2 else "",
                             "test_split": split, "skills": skills, "evaluation_protocol": EVALUATION_PROTOCOL})
-                    line, = axis.plot(x, means, style, label=f"{arm} / {policy}")
+                    line, = axis.plot(x, means, linestyle=style, label=f"{arm} / {policy}")
                     if len(runs) > 1:
                         axis.fill_between(x, lows, highs, color=line.get_color(), alpha=.08)
-            axis.set(title=metric.replace("_", " "), xlabel="Generation / round (D)")
+            axis.set(title=metric.replace("_", " "), xlabel="Generation (0 = founding population)")
             axis.grid(axis="y", alpha=.15)
         axes[0].legend(fontsize=7, frameon=False)
         fig.suptitle(f"A0 inherited weights / {split} / {skills}; independent-run intervals")
@@ -619,6 +675,18 @@ def plot_run(run_directory):
     fig.savefig(destination/"development.png", dpi=170)
     plt.close(fig)
     image_names = ["development.png"]
+    if "care_reward_food_relief" in rows[0]:
+        fig, axis = plt.subplots(figsize=(10, 4), constrained_layout=True)
+        for component in ("food_relief", "fear_relief", "maintenance", "unmet_need", "damage", "death", "survival"):
+            axis.plot(gens, [avg(g, f"care_reward_{component}") for g in gens],
+                      marker="o", markersize=3, label=component.replace("_", " "))
+        axis.set(title="Training only: parental reward components (not zero-shot evidence)",
+                 xlabel="Generation", ylabel="Mean cumulative reward per family")
+        axis.axhline(0, color="#999999", linewidth=.8)
+        axis.legend(fontsize=8, ncol=3, frameon=False)
+        fig.savefig(destination/"training_care_reward.png", dpi=160)
+        plt.close(fig)
+        image_names.append("training_care_reward.png")
     development = read_rows(run/"development.csv")
     if development:
         days = sorted({int(row["day"]) for row in development})
@@ -653,7 +721,7 @@ def plot_run(run_directory):
     fig.savefig(destination/"allocation_diversity.png", dpi=170)
     plt.close(fig)
     image_names.append("allocation_diversity.png")
-    if "mother_work_steps" in rows[0]:
+    if any(float(r.get("mother_work_steps", 0)) > 0 for r in rows):
         fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), constrained_layout=True)
         axes[0].plot(gens, [avg(g, "mother_work_steps") for g in gens], color="#c18f6c", label="Work steps")
         axes[0].plot(gens, [avg(g, "work_while_child_needy") for g in gens], color="#7796a7", label="Work during child need")
@@ -680,7 +748,7 @@ def plot_run(run_directory):
         image_names.append("needs_by_age.png")
     if evaluations:
         fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), constrained_layout=True)
-        for phase, color in (("A0", "#3f8071"), ("A1", "#698eaa"), ("A2", "#c28f73")):
+        for phase, color in (("A0", "#3f8071"),):
             for axis, key, title in zip(axes, ("child_health_mean", "help_within_20"),
                                        ("Frozen test · child health", "Response within 20 steps (descriptive)")):
                 data = {}
@@ -720,7 +788,7 @@ def plot_run(run_directory):
                  ("afraid_not_hungry", "fear_change", -1, "Afraid child / stress reduction"),
                  ("tired_silent", "fatigue_change", -1, "Tired child / fatigue reduction"))
         for axis, (scenario, metric, sign, title) in zip(axes, cases):
-            for phase, color in (("A0", "#477e6b"), ("A1", "#7796a7"), ("A2", "#c18f6c")):
+            for phase, color in (("A0", "#477e6b"),):
                 data = {}
                 for row in evaluations:
                     if row["scenario"] == scenario and row["phase"] == phase and row["intervention"] == "normal" and row.get("care_policy", "learned") == "learned":
@@ -760,9 +828,9 @@ def plot_run(run_directory):
     primary = "".join(f'<img src="plots/{name}" alt="{html.escape(name)}">' for name in primary_names)
     body = ("<h2>Primary evidence: full-lifetime A0</h2>" +
             (primary if primary else "<p>No completed full-lifetime A0 tests yet. Legacy short probes cannot answer this question.</p>") +
-            "<p>Learned policy vs scripted no-help / appropriate-help / help-priority baselines. Attempts are descriptive proxies, not proof of appropriate care. "
+            "<p>Model A inherited zero-shot trajectory vs Gen 0; scripted no-help / intermittent-help / appropriate-help / help-priority are environment references. Attempts are descriptive proxies, not proof of appropriate care. "
             "Intervals resample independent run seeds; a single run has no interval. Missing/extinct generations are not imputed; see CSV run counts. "
-            "Stage health includes deaths as zero; short profiles may not reach later stages. D is repeated training, not biological generations.</p>" +
+            "Generation zero is the untrained founding baseline. Care reward exists only in training. A0 uses inherited weights, fresh memory and no PPO or care reward. Stage health includes deaths as zero; short profiles may not reach later stages.</p>" +
             "<h2>Supplementary training and recorded frozen diagnostics</h2>" +
             "".join(f'<img src="plots/{name}" alt="{html.escape(name)}">' for name in image_names))
     report = ("<!doctype html><meta charset='utf-8'><title>Maternal · run report</title>"

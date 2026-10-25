@@ -9,7 +9,7 @@ import os
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ID = "maternal-instinct-3"
 OUTPUT_ROOT = ROOT / "outputs" / "2_model"
-PROTOCOL = "maternal-house-v2.4-care-dependent-growth"
+PROTOCOL = "maternal-house-v3.1-effective-care-reward"
 
 
 def available_cpu_count():
@@ -63,6 +63,14 @@ class WorldConfig:
     carry_energy: float = 0.05
     starvation_threshold: float = 20.0
     starvation_damage: float = 0.08
+    child_starvation_damage: float = 0.14
+    care_welfare_reward: float = 0.001
+    care_food_relief_reward: float = 0.6
+    care_fear_relief_reward: float = 0.2
+    care_need_penalty: float = 0.005
+    care_survival_bonus: float = 2.0
+    care_damage_penalty: float = 0.02
+    care_death_penalty: float = 2.0
     recovery: float = 0.008
     fatigue_cost: float = 0.05
     rest_recovery: float = 0.5
@@ -74,10 +82,6 @@ class WorldConfig:
     stress_damage: float = 0.01
     neglect_grace: int = 40
     unmet_need_stress: float = 0.08
-    work_reward: float = 0.015
-    work_fatigue: float = 0.12
-    work_energy: float = 0.01
-    work_fatigue_limit: float = 85.0
     play_relief: float = 0.7
     fear_gain: float = 2.0
     fear_recovery: float = 0.35
@@ -162,8 +166,8 @@ class ExperimentConfig:
             self.ppo_shuffle_rng = "per_agent"
         if self.device not in ("auto", "cuda", "cpu"):
             raise ValueError("device must be auto, cuda or cpu")
-        if self.arm not in "ABCD" or len(self.arm) != 1:
-            raise ValueError("arm must be A, B, C or D")
+        if self.arm != "A":
+            raise ValueError("This protocol supports Model A only")
         if self.population < 1 or self.generations < 1:
             raise ValueError("population and generations must be positive")
         if (self.world.width, self.world.height) != (7, 5):

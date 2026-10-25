@@ -1,4 +1,4 @@
-"""Home care: one joint clock, one mother, one child and an optional desk job."""
+"""Home care: one joint clock, one mother and one child; self-care and childcare."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -30,13 +30,12 @@ class Action(IntEnum):
     CARRY = 15
     RELEASE = 16
     PRACTICE = 17
-    WORK = 18
-    PLAY = 19
+    PLAY = 18
 
 
 SIGNALS = ("quiet", "cry", "help", "accept", "refuse", "warn", "soothe", "offer")
 MOVES = {Action.NORTH: (0, -1), Action.SOUTH: (0, 1), Action.EAST: (1, 0), Action.WEST: (-1, 0)}
-LOCAL_CHANNELS = 7  # blocked, food, bed, risk, other, desk, play area
+LOCAL_CHANNELS = 7  # blocked, food, bed, risk, other, reserved zero, play area
 OBS_SIZE = 13 + 10 + 8 + 3 + 25 * LOCAL_CHANNELS
 CUE_SLICE = slice(13, 34)
 
@@ -66,6 +65,7 @@ class Body:
     cold: float = 0.0
     fear: float = 0.0
     food: int = 0
+    maternal_food: int = 0  # Maternal provisions consumed first; no reward on mere handoff.
     forage: float = 0.0
     avoidance: float = 0.0
     signal: str = "quiet"
@@ -96,12 +96,13 @@ class Body:
 
 class FamilyWorld:
     def __init__(self, config: WorldConfig | None = None, seed: int = 0,
-                 mother: Body | None = None, child: Body | None = None, learn_skills=True):
+                 mother: Body | None = None, child: Body | None = None, learn_skills=True, care_rewards=False):
         self.config = copy.deepcopy(config or WorldConfig())
         self.rng = random.Random(seed)
         self.seed = seed
         self.t = 0
         self.learn_skills = learn_skills
+        self.care_rewards = care_rewards
         self.mother = copy.deepcopy(mother) if mother else Body(
             "preview-m", root_id="preview", role="mother", age_steps=self.config.horizon,
             forage=0.5, avoidance=0.3, food=1)
@@ -122,14 +123,17 @@ class FamilyWorld:
         kitchen_y = self.rng.choice((1, 3))
         self.food_sites = {(1, kitchen_y): 0}
         self.shelters = {(1, 4-kitchen_y)}  # bed/rest area
-        self.workstations = {(5, self.rng.choice((1, 3)))}
+        self.workstations = set()  # Reserved empty map channel; no job in this protocol.
         self.play_areas = {(3, 3)}
         self.walls = {(3, 1)}  # a single piece of furniture
         self.hazards = {(6, 4)}  # away from the desk; mild household risk
-        self.work_bonus = [0.0, 0.0]
         for role in ("mother", "child"):
             for cause in ("hunger", "exhaustion", "stress", "hazard"):
                 self.stats[f"{role}_damage_{cause}"] = 0.0
+        self.stats["mother_care_reward"] = 0.0
+        for component in ("food_relief", "fear_relief", "maintenance", "unmet_need", "damage", "death", "survival"):
+            self.stats[f"care_reward_{component}"] = 0.0
+        self._care_food_relief = self._care_fear_relief = 0.0
         self.stats.update(mother_work_steps=0.0, mother_work_reward=0.0,
                           work_while_child_needy=0.0, child_play_steps=0.0,
                           mother_rest_steps=0.0, child_food_requests=0.0)
@@ -248,8 +252,14 @@ class FamilyWorld:
         elif action == Action.EAT and body.food:
             if body.role == "child" and self.food_access_stage(body) == "dependent":
                 return
+            before_energy = body.energy
+            maternal_meal = body is self.child and body.maternal_food > 0
             body.food -= 1
+            if maternal_meal:
+                body.maternal_food -= 1
             body.energy = clamp(body.energy + self.config.meal_energy)
+            if maternal_meal:
+                self._care_food_relief += max(0.0, min(50.0, body.energy)-min(50.0, before_energy))
             if body is self.child:
                 self.stats["child_eats"] += 1
         elif action == Action.REST:
@@ -280,15 +290,6 @@ class FamilyWorld:
                 body.fatigue = clamp(body.fatigue + self.config.fatigue_cost)
                 if body is self.child:
                     self.stats["child_practice"] += 1
-        elif action == Action.WORK and body is self.mother:
-            if body.pos in self.workstations and body.fatigue < self.config.work_fatigue_limit and body.energy > self.config.starvation_threshold:
-                body.energy = clamp(body.energy - self.config.work_energy)
-                body.fatigue = clamp(body.fatigue + self.config.work_fatigue)
-                self.work_bonus[0] = self.config.work_reward
-                self.stats["mother_work_steps"] += 1
-                self.stats["mother_work_reward"] += self.config.work_reward
-                self.stats["work_while_child_needy"] += int(self.child.alive and (
-                    self.child.energy < 30 or self.child.fatigue > 70 or self.child.fear > 60))
         elif action == Action.PLAY and body is self.child and not self.carried:
             if body.pos in self.play_areas:
                 body.fear = clamp(body.fear - self.config.play_relief)
@@ -298,8 +299,8 @@ class FamilyWorld:
     def step(self, actions: tuple[int, int]):
         if self.t >= self.config.horizon:
             raise RuntimeError("Episode is complete; create the next generation explicitly")
+        self._care_food_relief = self._care_fear_relief = 0.0
         acts = tuple(Action(a) for a in actions)
-        self.work_bonus = [0.0, 0.0]
         bodies = (self.mother, self.child)
         old_hp = [b.hp for b in bodies]
         old_alive = [b.alive for b in bodies]
@@ -328,13 +329,17 @@ class FamilyWorld:
                         actor.food -= 1
                         other.food += 1
                         if i == 0:
+                            other.maternal_food += 1
                             self.stats["food_provisions"] += 1
                         self.event("Mother provided a meal for child to eat")
                     continue
                 before = other.energy
                 actor.food -= 1
+                if actor is self.child:
+                    actor.maternal_food = min(actor.maternal_food, actor.food)
                 other.energy = clamp(other.energy + self.config.meal_energy)
                 if i == 0:
+                    self._care_food_relief += max(0.0, min(50.0, other.energy)-min(50.0, before))
                     self.stats["feeds"] += 1
                     self.stats["effective_feeds"] += int(before < 50)
                     self.stats["unneeded_feeds"] += int(before > 85)
@@ -344,8 +349,10 @@ class FamilyWorld:
                 self._signal(actor, "soothe")
                 receptive = not old_refused[1-i] and (self.skill_cap(other) == 0 or old_consented[1-i])
                 if receptive:
+                    before_fear = other.fear
                     other.fear = clamp(other.fear - self.config.soothe_effect)
                     if i == 0:
+                        self._care_fear_relief += max(0.0, max(0.0, before_fear-60)-max(0.0, other.fear-60))
                         self.stats["soothes"] += 1
             elif action == Action.CARRY and i == 0 and old_near:
                 if not self.carried:
@@ -382,7 +389,9 @@ class FamilyWorld:
             body.hunger_steps = body.hunger_steps + 1 if body.energy < self.config.starvation_threshold else 0
             body.exhaustion_steps = body.exhaustion_steps + 1 if body.fatigue > self.config.exhaustion_threshold else 0
             body.stress_steps = body.stress_steps + 1 if body.fear > self.config.stress_threshold else 0
-            causes = {"hunger": self.config.starvation_damage if body.hunger_steps > self.config.neglect_grace else 0.0,
+            hunger_damage = (self.config.starvation_damage if body.role == "mother"
+                             else self.config.child_starvation_damage)
+            causes = {"hunger": hunger_damage if body.hunger_steps > self.config.neglect_grace else 0.0,
                       "exhaustion": self.config.exhaustion_damage if body.exhaustion_steps > self.config.neglect_grace else 0.0,
                       "stress": self.config.stress_damage if body.stress_steps > self.config.neglect_grace else 0.0,
                       "hazard": 0.0}
@@ -408,10 +417,32 @@ class FamilyWorld:
                 body.signal = "quiet"
             death = float(not body.alive)
             reward = (0.01 - 0.005 * (1-body.energy/100) - 0.002 * body.fatigue/100) * float(body.alive)
-            reward += self.work_bonus[i]
             reward -= 0.2 * max(0.0, old_hp[i] - body.hp)/100 + 5.0 * death
             rewards.append(reward)
             self.stats[("mother" if i == 0 else "child") + "_damage"] += max(0, old_hp[i] - body.hp)
+        # Training-only shaping: credit actual maternal relief, not action selection.
+        # Food handoffs earn nothing until the child eats that provided meal.
+        if self.care_rewards and self.mother.alive:
+            c = self.child
+            welfare = (c.hp/100 * min(1.0, c.energy/40)
+                       * (1-c.fatigue/100) * (1-c.fear/100)) if c.alive else 0.0
+            unmet = (max(0.0, 30-c.energy)/30 + max(0.0, c.fatigue-70)/30
+                     + max(0.0, c.fear-60)/40) if c.alive else 0.0
+            components = {
+                "food_relief": self.config.care_food_relief_reward*self._care_food_relief/max(1e-8, self.config.meal_energy),
+                "fear_relief": self.config.care_fear_relief_reward*self._care_fear_relief/max(1e-8, self.config.soothe_effect),
+                "maintenance": self.config.care_welfare_reward*welfare,
+                "unmet_need": -self.config.care_need_penalty*unmet,
+                "damage": -self.config.care_damage_penalty*max(0.0, old_hp[1]-c.hp),
+                "death": -self.config.care_death_penalty*int(old_alive[1] and not c.alive),
+                "survival": self.config.care_survival_bonus*c.hp/100
+                            if c.alive and self.t+1 == self.config.horizon else 0.0,
+            }
+            care_reward = sum(components.values())
+            rewards[0] += care_reward
+            self.stats["mother_care_reward"] += care_reward
+            for name, amount in components.items():
+                self.stats[f"care_reward_{name}"] += amount
         self.t += 1
         c = self.child
         self.stats["child_hp_sum"] += c.hp if c.alive else 0
@@ -504,6 +535,7 @@ class FamilyWorld:
 
     def summary(self):
         return {**self.stats, "steps": self.t, "mother_alive": int(self.mother.alive),
+                "mother_care_reward": self.stats["mother_care_reward"],
                 "child_alive": int(self.child.alive), "mother_hp": self.mother.hp, "child_hp": self.child.hp,
                 "child_energy": self.child.energy, "child_forage": self.child.forage,
                 "child_fatigue": self.child.fatigue, "child_stress": self.child.fear,
@@ -586,8 +618,7 @@ def demo_action(world: FamilyWorld, who: int, style="appropriate"):
     if b.energy < 70 and b.food:
         return Action.EAT
     if who == 0:
-        target = min(world.workstations, key=lambda p: distance(b.pos, p))
-        return Action.WORK if b.pos == target else path_action(world, b.pos, target)
+        return Action.REST
     if b.fear > 35:
         target = min(world.play_areas, key=lambda p: distance(b.pos, p))
         return Action.PLAY if b.pos == target else path_action(world, b.pos, target)

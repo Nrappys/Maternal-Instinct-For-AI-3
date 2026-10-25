@@ -56,13 +56,6 @@ def world_png(world, title="Grid World", note="", z_mother=None):
         draw.rectangle((x-13, y-5, x-3, y+5), outline=c["shelter"], width=1)
         draw.line((x-17, y+9, x-17, y+15), fill=c["shelter"], width=2)
         draw.line((x+17, y+9, x+17, y+15), fill=c["shelter"], width=2)
-    for pos in world.get("workstations", []):
-        x, y = center(pos)
-        draw.rounded_rectangle((x-12, y-18, x+12, y-2), 2, outline=c["mother"], width=2)
-        draw.line((x-19, y+3, x+19, y+3), fill=c["shelter"], width=3)
-        draw.line((x-14, y+3, x-14, y+18), fill=c["shelter"], width=2)
-        draw.line((x+14, y+3, x+14, y+18), fill=c["shelter"], width=2)
-        text((x-34, y-35), "W", 12, c["mother"], True)
     for pos in world.get("play_areas", []):
         x, y = center(pos)
         draw.ellipse((x-13, y-13, x+13, y+13), outline=c["child_edge"], width=2)
@@ -98,11 +91,9 @@ def world_png(world, title="Grid World", note="", z_mother=None):
         if alive and body["signal"] not in ("quiet", "accept"):
             draw.ellipse((x+13, y-32, x+31, y-14), fill=c["cell"], outline=c["line"])
             text((x+22, y-24), "!", 12, c["risk"], anchor="mm")
-    text((32, 605), "M Mother   C Child   leaf Food   bed Rest   W Work   ball Play", 14, c["muted"])
+    text((32, 605), "M Mother   C Child   leaf Food   bed Rest   ball Play", 14, c["muted"])
     text((32, 637), f"Day {world['day']} / {world['days']}    Step {world['step']:,} / {world['horizon']:,}", 16, bold=True)
-    work_steps = int(world.get("stats", {}).get("mother_work_steps", 0))
-    work_reward = world.get("stats", {}).get("mother_work_reward", 0)
-    text((32, 672), f"Work: {work_steps:,} steps / reward {work_reward:.2f}", 13, c["muted"])
+    text((32, 672), f"Self-care + childcare / care reward: {world.get('stats', {}).get('mother_care_reward', 0):.2f}", 13, c["muted"])
     stage = world.get("child_food_access_stage", "unknown")
     wait = world.get("child_gather_wait", 0)
     text((714, 590), f"Child food: {stage} / gather wait {wait}", 13, c["muted"])

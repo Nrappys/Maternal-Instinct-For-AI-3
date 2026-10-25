@@ -77,11 +77,27 @@ class FullLifetimeEvaluation(unittest.TestCase):
     def test_untreated_severe_hunger_can_be_fatal_before_independence(self):
         import math
         world = ExperimentConfig.profile().world
-        untreated_steps = world.neglect_grace + math.ceil(100/world.starvation_damage)
+        untreated_steps = world.neglect_grace + math.ceil(100/world.child_starvation_damage)
         self.assertLess(untreated_steps, world.early_child_days*world.steps_per_day)
         # A fresh, initially healthy infant has over one day before hunger damage.
         self.assertGreater((70-world.starvation_threshold)/world.infant_drain,
                            world.steps_per_day)
+
+    def test_hunger_damage_is_role_specific_and_stops_after_food(self):
+        from maternal.environment import FamilyWorld
+        world = FamilyWorld()
+        for body in (world.mother, world.child):
+            body.energy = 10
+            body.hunger_steps = world.config.neglect_grace
+            body.fatigue = body.fear = 0
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertAlmostEqual(world.mother.hp, 100-world.config.starvation_damage)
+        self.assertAlmostEqual(world.child.hp, 100-world.config.child_starvation_damage)
+        before = world.child.hp
+        world.child.energy = 60
+        world.step((Action.WAIT, Action.WAIT))
+        self.assertGreaterEqual(world.child.hp, before)
+        self.assertEqual(world.child.hunger_steps, 0)
 
     def test_age_gates_share_the_same_configured_boundaries(self):
         config = ExperimentConfig.profile()
@@ -204,8 +220,8 @@ class FullLifetimeEvaluation(unittest.TestCase):
         from maternal.config import ROOT, OUTPUT_ROOT, PROTOCOL
         from maternal.evaluation import EVALUATION_PROTOCOL
         self.assertEqual(OUTPUT_ROOT, ROOT/"outputs"/"2_model")
-        self.assertEqual(PROTOCOL, "maternal-house-v2.4-care-dependent-growth")
-        self.assertEqual(EVALUATION_PROTOCOL, "full_lifetime_care_v5_care_dependent_growth")
+        self.assertEqual(PROTOCOL, "maternal-house-v3.1-effective-care-reward")
+        self.assertEqual(EVALUATION_PROTOCOL, "full_lifetime_care_v10_effective_care")
 
     def test_child_moves_slowly_by_age_while_mother_speed_is_unchanged(self):
         from maternal.environment import FamilyWorld
@@ -241,7 +257,7 @@ class FullLifetimeEvaluation(unittest.TestCase):
         world = FamilyWorld()
         with patch("maternal.evaluation.reference_mother_action", return_value=Action.FEED), \
              patch("maternal.evaluation.demo_action", return_value=Action.REST):
-            for step, expected in ((0, Action.FEED), (49, Action.FEED), (50, Action.REST),
+            for step, expected in ((0, Action.FEED), (99, Action.FEED), (100, Action.REST),
                                    (799, Action.REST), (800, Action.FEED)):
                 world.t = step
                 self.assertEqual(care_action(None, world, "normal", "light_help"), expected)

@@ -325,7 +325,7 @@ class BalancePanel(_Panel):
             writer = csv.DictWriter(handle, fieldnames=list(summary[0]))
             writer.writeheader(); writer.writerows(summary)
         metadata["status"] = "completed"
-        metadata["interpretation"] = "Compare no_help, intermittent light_help, appropriate_help and always_help by survival AND stage-specific health. Light help is available for one quarter-day every four days. Do not assume calibration before inspecting results."
+        metadata["interpretation"] = "Compare no_help, intermittent light_help, appropriate_help and always_help by survival AND stage-specific health. Light help is available for one half-day every four days. Do not assume calibration before inspecting results."
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         self._emit({"kind": "frame", "overall": 1})
         self._emit({"kind": "done", "status": "Balance check completed · inspect summary.csv before training", "output": str(destination)})
@@ -334,8 +334,10 @@ class BalancePanel(_Panel):
 class TrainingPanel(_Panel):
     def __init__(self, config, arms=None, seeds=None):
         super().__init__("Across generations", config)
+        if isinstance(seeds, int):
+            seeds = (seeds,)
         self.batch = arms is not None
-        self.arm = W.SelectMultiple(options=tuple("ABCD"), value=tuple(arms), description="Arms") if self.batch else W.Dropdown(options=tuple("ABCD"), value=config.arm, description="Arm")
+        self.arm = W.SelectMultiple(options=("A",), value=("A",), description="Arms") if self.batch else W.Dropdown(options=("A",), value=config.arm, description="Arm")
         self.seed_input = W.Text(value=", ".join(map(str, seeds or (config.seed,))), description="Seeds") if self.batch else W.BoundedIntText(value=config.seed, min=0, max=2**31-1, description="Seed")
         self.start.description = "Start batch" if self.batch else "Start training"
         self.backend = W.Dropdown(options=(("Serial", "serial"), ("Threads", "threads"),
@@ -436,7 +438,7 @@ class FrozenModelPanel(_Panel):
         self.start.description = "Show model"
         self.stop.description = "Stop viewing"
         self.path = W.Text(description="Checkpoint", placeholder="outputs/2_model/run_.../models/gen_000.pt", layout=W.Layout(width="100%"))
-        self.phase = W.Dropdown(options=("A0", "A1", "A2"), value="A0", description="Phase")
+        self.phase = W.Dropdown(options=("A0",), value="A0", description="Phase")
         from .evaluation import SCENARIOS
         self.scenario = W.Dropdown(options=SCENARIOS, value="hungry", description="Scenario", layout=W.Layout(width="350px"))
         self.family = W.BoundedIntText(value=0, min=0, max=10000, description="Family")
@@ -456,7 +458,7 @@ class FrozenModelPanel(_Panel):
             raise ValueError("Family index is outside checkpoint population")
         item = payload["families"][index]
         if item["world"].t != config.world.horizon:
-            raise ValueError("Choose a completed-generation checkpoint for matched A0/A1/A2 viewing")
+            raise ValueError("Choose a completed-generation checkpoint for inherited A0 viewing")
         phase = self.phase.value
         state = item["mother"] if phase == "A2" else payload["starts"][index]
         source = Learner.restore(config, state)
@@ -509,7 +511,7 @@ class EvaluationPanel(_Panel):
         self._emit({"kind": "log", "text": device_description(config)})
         self._emit({"kind": "log", "text": execution_description(config)})
         if not payload["families"] or any(item["world"].t != config.world.horizon for item in payload["families"]):
-            raise ValueError("Choose a completed care episode with A0/A1/A2 snapshots")
+            raise ValueError("Choose a completed care episode with inherited A0 snapshots")
         if not self.interventions.value:
             raise ValueError("Select at least one condition")
         generation = payload["families"][0]["world"].mother.generation
@@ -524,7 +526,7 @@ class EvaluationPanel(_Panel):
             "test_split": self.split.value, "skill_regime": self.skills.value,
             "note": "New evaluation only. Legacy CSVs and training checkpoint are unchanged."
         }, indent=2), encoding="utf-8")
-        for phase_index, phase in enumerate(("A0", "A1", "A2")):
+        for phase_index, phase in enumerate(("A0",)):
             records = []
             for index, item in enumerate(payload["families"]):
                 state = item["mother"] if phase == "A2" else payload["starts"][index]
@@ -532,7 +534,7 @@ class EvaluationPanel(_Panel):
                 records.append((Learner.restore(config, state), body))
             def progress(world, fraction):
                 self._emit({"kind": "frame", "world": world.snapshot(),
-                            "overall": (phase_index+fraction)/3,
+                            "overall": (phase_index+fraction),
                             "episode_fraction": world.t/config.world.horizon,
                             "label": f"FROZEN {phase} · {world.care_test.get('care_policy', 'learned')} · {self.split.value} · NO LEARNING"})
             for row in evaluate_phase(records, config, generation, phase, control=self._check, progress=progress,

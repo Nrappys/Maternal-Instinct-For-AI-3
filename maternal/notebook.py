@@ -19,7 +19,7 @@ import traceback
 import ipywidgets as W
 from IPython.display import HTML, Image, display
 
-from .config import ExperimentConfig, ROOT, PROTOCOL, OUTPUT_ROOT
+from .config import ExperimentConfig, ROOT, PROTOCOL, OUTPUT_ROOT, available_cpu_count
 from .environment import Action, FamilyWorld, demo_action
 
 from .rendering import COLORS, world_png
@@ -30,6 +30,8 @@ _RUN_LOCK = threading.Lock()
 def device_description(config):
     """Only called by a started worker, after device selection."""
     import torch
+    if config.execution_backend == "processes":
+        return "Device: CPU · multi-core process mode; 1 PyTorch thread per process"
     if config.device == "cuda":
         return f"Device: CUDA · {torch.cuda.get_device_name(0)}"
     reason = "CPU selected / CPU-only PyTorch build" if torch.version.cuda is None else "CPU selected or CUDA unavailable to PyTorch"
@@ -37,9 +39,12 @@ def device_description(config):
 
 
 def execution_description(config):
-    workers = min(config.family_workers, config.population)
-    return (f"Family threads: {workers} · PPO shuffle: {config.ppo_shuffle_rng} · "
-            "independent agents; fitness and zero-shot remain sequential")
+    workers = 1 if config.execution_backend == "serial" else min(config.family_workers, config.population)
+    if config.execution_backend == "processes":
+        workers = min(workers, available_cpu_count())
+    evaluation = "CPU processes" if config.execution_backend == "processes" and config.parallel_zero_shot else "sequential"
+    return (f"Family backend: {config.execution_backend} · workers: {workers} · PPO shuffle: {config.ppo_shuffle_rng} · "
+            f"train fitness: sequential · zero-shot: {evaluation}")
 
 
 class NotebookStop(Exception):
@@ -331,8 +336,11 @@ class TrainingPanel(_Panel):
         self.arm = W.SelectMultiple(options=tuple("ABCD"), value=tuple(arms), description="Arms") if self.batch else W.Dropdown(options=tuple("ABCD"), value=config.arm, description="Arm")
         self.seed_input = W.Text(value=", ".join(map(str, seeds or (config.seed,))), description="Seeds") if self.batch else W.BoundedIntText(value=config.seed, min=0, max=2**31-1, description="Seed")
         self.start.description = "Start batch" if self.batch else "Start training"
-        self.workers = W.BoundedIntText(value=config.family_workers, min=1, max=64, description="Threads")
-        self.extra_controls.children = (self.arm, self.seed_input, self.workers)
+        self.backend = W.Dropdown(options=(("Serial", "serial"), ("Threads", "threads"),
+                                           ("Multi-core CPU", "processes")),
+                                  value=config.execution_backend, description="Backend")
+        self.workers = W.BoundedIntText(value=config.family_workers, min=1, max=64, description="Workers")
+        self.extra_controls.children = (self.arm, self.seed_input, self.backend, self.workers)
 
     def _job(self):
         self._check()
@@ -353,7 +361,8 @@ class TrainingPanel(_Panel):
         for arm, seed in jobs:
             config = copy.deepcopy(self.config)
             config.arm, config.seed = arm, seed
-            config.family_workers = self.workers.value
+            config.execution_backend = self.backend.value
+            config.family_workers = 1 if config.execution_backend == "serial" else self.workers.value
             config.validate()
             configs.append(config)
         for index, config in enumerate(configs):
@@ -363,8 +372,10 @@ class TrainingPanel(_Panel):
             engine = Experiment(config)
             self._emit({"kind": "log", "text": device_description(engine.config)})
             self._emit({"kind": "log", "text": execution_description(engine.config)})
+            if arm == "D":
+                self._emit({"kind": "log", "text": "D retains the same mothers across all requested rounds; child extinction does not end this control arm. Compare time per round, not total time against extinct runs."})
             if engine.config.ppo_shuffle_rng == "per_agent":
-                self._emit({"kind": "log", "text": "Per-agent PPO shuffle RNG differs from legacy runs. Same seed need not reproduce old results; thread speedup is not guaranteed."})
+                self._emit({"kind": "log", "text": "Per-agent PPO shuffle RNG differs from legacy runs. Same seed need not reproduce old results; parallel speedup is not guaranteed."})
             terminal = {}
             def callback(frame):
                 if frame["kind"] == "done":
@@ -473,7 +484,11 @@ class EvaluationPanel(_Panel):
         self.interventions = W.SelectMultiple(options=INTERVENTIONS, value=("normal",), description="Conditions", layout=W.Layout(width="100%", height="120px"))
         self.split = W.Dropdown(options=("monitor", "holdout"), value="monitor", description="Test split")
         self.skills = W.Dropdown(options=("matched", "native"), value="matched", description="Skills")
-        self.extra_controls.children = (self.path, self.interventions, self.split, self.skills)
+        self.parallel_eval = W.Checkbox(value=config.parallel_zero_shot and config.execution_backend == "processes",
+                                       description="Multi-core CPU")
+        self.eval_workers = W.BoundedIntText(value=config.family_workers, min=1, max=64, description="Workers")
+        self.extra_controls.children = (self.path, self.interventions, self.split, self.skills,
+                                        self.parallel_eval, self.eval_workers)
 
     def _job(self):
         self._check()
@@ -484,7 +499,13 @@ class EvaluationPanel(_Panel):
         path = _checkpoint_path(self.path.value)
         payload = load_checkpoint(path)
         config = evaluation_config(payload)
+        config.parallel_zero_shot = self.parallel_eval.value
+        if config.parallel_zero_shot:
+            config.execution_backend, config.device = "processes", "cpu"
+            config.family_workers = self.eval_workers.value
+        config.validate()
         self._emit({"kind": "log", "text": device_description(config)})
+        self._emit({"kind": "log", "text": execution_description(config)})
         if not payload["families"] or any(item["world"].t != config.world.horizon for item in payload["families"]):
             raise ValueError("Choose a completed care episode with A0/A1/A2 snapshots")
         if not self.interventions.value:
@@ -496,6 +517,8 @@ class EvaluationPanel(_Panel):
             "saved_eval_steps": payload["config"].get("eval_steps"), "eval_steps": config.world.horizon,
             "source_hashes": source_hashes(), "checkpoint_source_hashes": payload["source_hashes"],
             "weights_frozen": True, "memory_reset": True, "runtime_device": config.device,
+            "evaluation_backend": "processes" if config.parallel_zero_shot and config.execution_backend == "processes" else "serial",
+            "evaluation_workers": min(config.family_workers, available_cpu_count()) if config.parallel_zero_shot else 1,
             "test_split": self.split.value, "skill_regime": self.skills.value,
             "note": "New evaluation only. Legacy CSVs and training checkpoint are unchanged."
         }, indent=2), encoding="utf-8")

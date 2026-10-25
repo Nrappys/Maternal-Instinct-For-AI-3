@@ -58,7 +58,7 @@ def fitness_probe(learner, body, config, control=lambda: None, on_step=lambda: N
         for _ in range(min(config.fitness_steps, config.world.horizon)):
             control()
             if world.child.alive:
-                action, _ = actor.choose(world.observation(1))
+                action = actor.act(world.observation(1)) if hasattr(actor, "act") else actor.choose(world.observation(1))[0]
             else:
                 action = Action.WAIT
             world.step((Action.WAIT, action))
@@ -83,7 +83,7 @@ def evaluation_config(payload):
     if payload.get("protocol") != PROTOCOL or not all(saved.get(k) == current.get(k) for k in keys):
         raise ValueError("Frozen evaluation requires matching policy, physics and inheritance code")
     config = ExperimentConfig.from_dict(payload["config"])
-    config.device = resolve_device()
+    config.device = "cpu" if config.execution_backend == "processes" else resolve_device()
     config.eval_steps = config.world.horizon
     return config
 
@@ -219,7 +219,9 @@ def care_action(learner, world, intervention, care_policy):
         return reference_mother_action(world)
     if care_policy == "always_help":
         return demo_action(world, 0, "always_help")
-    action, _ = learner.choose(world.observation(0, intervention), intervention=intervention)
+    observation = world.observation(0, intervention)
+    action = (learner.act(observation, intervention=intervention) if hasattr(learner, "act")
+              else learner.choose(observation, intervention=intervention)[0])
     return Action(action)
 
 
@@ -325,26 +327,97 @@ def run_scenario(learner, body, config, scenario, seed, intervention="normal", c
             **counts, **stage_results, **world.summary()}
 
 
+def _evaluation_subject(learner, body, config, generation, phase, index, count, skill_regime, test_split):
+    from .agent import genome_hash
+
+    test_body = copy.deepcopy(body)
+    if skill_regime == "matched":
+        test_body.forage, test_body.avoidance = 0.5, 0.3
+    elif phase == "A0":
+        test_body.forage = test_body.avoidance = 0.0
+    metadata = {"generation": generation, "phase": phase, "candidate": index,
+                "genome_hash": genome_hash(learner.genome), "arm": config.arm,
+                "sampled_candidates": count,
+                "run_seed": config.seed, "test_split": test_split, "skill_regime": skill_regime,
+                "weight_source": {"A0": "inherited_initial", "A1": "before_parenthood", "A2": "after_parenthood"}[phase],
+                "memory_reset": True, "learning_enabled": False,
+                "subject_agent_id": body.agent_id, "source_child_id": body.clone_source_id,
+                "subject_origin": "repeated_mother" if config.arm == "D" else ("founder" if generation == 0 else "grown_child")}
+    return test_body, metadata
+
+
+def _evaluate_phase_processes(records, config, generation, phase, indices, jobs, skill_regime,
+                              test_split, control, progress, on_step):
+    import multiprocessing as mp
+    import pickle
+    from concurrent.futures import ProcessPoolExecutor
+    from .config import available_cpu_count
+    from .parallel import _evaluation_initializer, ordered_evaluation_results
+
+    if not indices:
+        return
+    subjects = []
+    for index in indices:
+        control()
+        learner, body = records[index]
+        test_body, metadata = _evaluation_subject(learner, body, config, generation, phase, index,
+                                                  len(indices), skill_regime, test_split)
+        subjects.append({"index": index, "state": learner.state(include_buffer=False),
+                         "body": test_body, "metadata": metadata})
+    by_index = {subject["index"]: subject for subject in subjects}
+    total = max(1, len(indices)*len(SCENARIOS)*config.eval_seeds*len(jobs))
+    workers = min(config.family_workers, available_cpu_count(), total)
+    context = mp.get_context("spawn")
+    cancel = context.Event()
+    executor = ProcessPoolExecutor(max_workers=workers, mp_context=context,
+                                   initializer=_evaluation_initializer,
+                                   initargs=(config.to_dict(), pickle.dumps(subjects), cancel))
+    try:
+        scores = {}
+        for result in ordered_evaluation_results(executor, [("fitness", index) for index in indices], workers, control):
+            scores[result["index"]] = result["score"]
+            for _ in range(result["steps"]):
+                on_step()
+        tasks = (("scenario", index, scenario, seed, intervention, policy)
+                 for index in indices for scenario in SCENARIOS for seed in range(config.eval_seeds)
+                 for intervention, policy in jobs)
+        for completed, result in enumerate(ordered_evaluation_results(executor, tasks, workers, control), 1):
+            control()
+            index = result["index"]
+            subject, score = by_index[index], scores[index]
+            for _ in range(result["steps"]):
+                on_step()
+            if progress:
+                progress(result["world"], completed/total)
+            yield {**subject["metadata"], "basic_selfcare_score": score, "adult_readiness_score": score,
+                   "mother_forage": subject["body"].forage,
+                   "mother_avoidance": subject["body"].avoidance, **result["result"]}
+    finally:
+        # Workers check this event every step. Cancelled/partial cases produce no rows.
+        cancel.set()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def evaluate_phase(records, config, generation, phase, control=lambda: None, progress=None,
                    interventions=("normal",), sample_indices=None, skill_regime="matched", on_step=lambda: None,
-                   test_split="monitor", care_policies=CARE_POLICIES):
+                   test_split="monitor", care_policies=CARE_POLICIES, parallel=True):
     """Frozen, paired tests. Scripted baselines run once in A0/normal only."""
-    from .agent import genome_hash
     if phase not in ("A0", "A1", "A2"):
         raise ValueError("Unknown evaluation phase")
     indices = sample_indices if sample_indices is not None else sample_unique(
         records, config.eval_candidates, config.seed+generation*7919+900_000)
     jobs = [(intervention, policy) for intervention in interventions for policy in care_policies
             if policy == "learned" or (phase == "A0" and intervention == "normal")]
+    if parallel and config.parallel_zero_shot and config.execution_backend == "processes":
+        yield from _evaluate_phase_processes(records, config, generation, phase, list(indices), jobs,
+                                              skill_regime, test_split, control, progress, on_step)
+        return
     total = max(1, len(indices)*len(SCENARIOS)*config.eval_seeds*len(jobs))
     completed = 0
     for index in indices:
         learner, body = records[index]
-        test_body = copy.deepcopy(body)
-        if skill_regime == "matched":
-            test_body.forage, test_body.avoidance = 0.5, 0.3
-        elif phase == "A0":
-            test_body.forage = test_body.avoidance = 0.0
+        test_body, metadata = _evaluation_subject(learner, body, config, generation, phase, index,
+                                                  len(indices), skill_regime, test_split)
         control_actor = learner.evaluation_copy(naive=phase == "A0", seed=600_000)
         basic_score = fitness_probe(control_actor, test_body, config, control, on_step, as_adult=True)
         for scenario in SCENARIOS:
@@ -355,14 +428,7 @@ def evaluate_phase(records, config, generation, phase, control=lambda: None, pro
                     result = run_scenario(actor, test_body, config, scenario, seed, intervention, control,
                                           (lambda w: progress(w, (completed+w.t/config.world.horizon)/total)) if progress else None,
                                           on_step, test_split, policy)
-                    yield {"generation": generation, "phase": phase, "candidate": index,
-                           "genome_hash": genome_hash(learner.genome), "arm": config.arm,
-                           "sampled_candidates": len(indices),
-                           "run_seed": config.seed, "test_split": test_split, "skill_regime": skill_regime,
-                           "weight_source": {"A0": "inherited_initial", "A1": "before_parenthood", "A2": "after_parenthood"}[phase],
-                           "memory_reset": True, "learning_enabled": False,
-                           "subject_agent_id": body.agent_id, "source_child_id": body.clone_source_id,
-                           "subject_origin": "repeated_mother" if config.arm == "D" else ("founder" if generation == 0 else "grown_child"),
+                    yield {**metadata,
                            "basic_selfcare_score": basic_score, "adult_readiness_score": basic_score,
                            "mother_forage": test_body.forage, "mother_avoidance": test_body.avoidance, **result}
                     completed += 1

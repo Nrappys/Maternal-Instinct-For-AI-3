@@ -4,11 +4,26 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 import json
+import os
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ID = "maternal-instinct-3"
 OUTPUT_ROOT = ROOT / "outputs" / "full_lifetime"
 PROTOCOL = "maternal-house-v2.2-dependent-child"
+
+
+def available_cpu_count():
+    """Respect Linux CPU affinity when present; no hardware probing or execution."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def recommended_process_workers(population=16):
+    # Conservative starting point for this 155H / 16 GB laptop. Each worker
+    # imports its own Torch/SB3 runtime; more workers also cost more memory.
+    return max(1, min(4, population, available_cpu_count() - 2))
 
 
 def resolve_device(requested="auto"):
@@ -102,6 +117,9 @@ class ExperimentConfig:
     device: str = "auto"
     family_workers: int = 1
     ppo_shuffle_rng: str = "legacy"
+    execution_backend: str = "threads"
+    process_chunk_steps: int = 128
+    parallel_zero_shot: bool = True
     world: WorldConfig = field(default_factory=WorldConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
@@ -117,15 +135,23 @@ class ExperimentConfig:
             config.fitness_seeds, config.fitness_steps = 1, 40
             config.world.days = 2
             config.ppo.rollout, config.ppo.batch_size = 64, 32
+        config.execution_backend = "processes"
+        config.family_workers = recommended_process_workers(config.population)
         config.validate()
         return config
 
     def validate(self):
+        if type(self.parallel_zero_shot) is not bool:
+            raise ValueError("parallel_zero_shot must be True or False")
+        if self.execution_backend not in ("serial", "threads", "processes"):
+            raise ValueError("execution_backend must be serial, threads or processes")
+        if type(self.process_chunk_steps) is not int or not 1 <= self.process_chunk_steps <= 1024:
+            raise ValueError("process_chunk_steps must be an integer from 1 to 1024")
         if type(self.family_workers) is not int or not 1 <= self.family_workers <= 64:
             raise ValueError("family_workers must be an integer from 1 to 64")
         if self.ppo_shuffle_rng not in ("legacy", "per_agent"):
             raise ValueError("ppo_shuffle_rng must be legacy or per_agent")
-        if self.family_workers > 1:
+        if self.family_workers > 1 or self.execution_backend == "processes":
             # Global NumPy shuffling would depend on thread scheduling.
             self.ppo_shuffle_rng = "per_agent"
         if self.device not in ("auto", "cuda", "cpu"):

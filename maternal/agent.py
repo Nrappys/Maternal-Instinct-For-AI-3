@@ -156,6 +156,27 @@ class Learner:
             value = self.model.policy.predict_values(tensor)
         return int(action), (augmented, int(action), value, log_prob, self.episode_start)
 
+    def act(self, observation, intervention="normal", greedy=False):
+        """Identical actor/RNG path without unused critic/log-prob work in tests."""
+        augmented = self._input(observation, intervention, commit=True)
+        tensor = torch.from_numpy(augmented[None, :]).to(self.model.device)
+        self.model.policy.set_training_mode(False)
+        with torch.no_grad():
+            probabilities = self.model.policy.get_distribution(tensor).distribution.probs[0].cpu()
+            action = torch.argmax(probabilities) if greedy else torch.multinomial(probabilities, 1, generator=self.generator)[0]
+        return int(action)
+
+    def reset_evaluation_context(self, seed):
+        """Reuse a private, never-trained evaluation copy with fresh case memory."""
+        if not getattr(self, "_evaluation_only", False) or self.updates or self.transitions:
+            raise RuntimeError("Only an unused frozen evaluation actor can be reset")
+        if self.model.rollout_buffer.pos:
+            raise RuntimeError("Frozen evaluation actor contains training transitions")
+        self.seed = seed
+        self.z.fill(0)
+        self.generator.manual_seed(seed ^ 0x5A17)
+        self.episode_start = True
+
     def record(self, transition, reward, next_observation, terminal, learn=True, flush=False):
         self.transitions += 1
         if not learn:
@@ -247,4 +268,5 @@ class Learner:
         if not naive:
             result.model.policy.load_state_dict(copy.deepcopy(self.model.policy.state_dict()))
         result.z[:] = 0
+        result._evaluation_only = True
         return result

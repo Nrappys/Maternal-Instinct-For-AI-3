@@ -86,17 +86,43 @@ Run ใหม่มี config.json, manifest.json, models/gen_*.pt, models/lates
 
 ประเมินเพิ่มเขียน evaluations_full_lifetime_*.csv + JSON แยกจาก monitor เดิม ไฟล์ที่หยุดกลางงานไม่ใช้เป็นผลเต็มชุดในรายงานหลัก ปุ่ม Build run report สร้าง report.html และ plots/a0_*_summary.csv / a0_*_by_scenario.csv; Compare selected ใช้ monitor/matched เป็นผลหลัก
 
-Device เริ่มต้น auto ตรวจ PyTorch ตอนกดเริ่มงาน ใช้ CUDA เมื่อรองรับ มิฉะนั้น CPU แสดงอุปกรณ์ใน log ตัวโลก การสุ่ม Action และกลไกภายในที่ตรึงไว้ทำงานบน CPU การเปลี่ยนอุปกรณ์ไม่รับประกันผลตรงทุกบิตแม้ใช้ Seed เดิม
+ใน Backend Serial/Threads ค่า Device auto ตรวจ PyTorch ตอนกดเริ่มงาน ใช้ CUDA เมื่อรองรับ มิฉะนั้น CPU ส่วน Backend Multi-core CPU ใช้ CPU เสมอและจำกัด PyTorch 1 thread ต่อ Process แสดงอุปกรณ์และ Backend ใน log ตัวโลก การสุ่ม Action และกลไกภายในที่ตรึงไว้ทำงานบน CPU การเปลี่ยนอุปกรณ์ไม่รับประกันผลตรงทุกบิตแม้ใช้ Seed เดิม
 
 Grid World แสดงใน Notebook เดิม ไม่มีหน้าต่างแยก Calm/Flow/Fast หน่วงภาพ .10/.03/0 วินาที เลือก View → Off เพื่อซ่อน Simulation และข้ามการสร้างภาพระหว่างรัน โดยยังแสดง Progress bar, เวลา และ log เปลี่ยนโหมดระหว่างรันได้ ไม่เปลี่ยนกติกาหรือการเรียนรู้
 
-## หลาย Threads
+## Multi-core สำหรับ Intel Core Ultra 7 155H
 
-หน้าควบคุมเทรนงานเดียวและ Batch มีช่อง **Threads** ค่าเริ่มต้น 1 คงลำดับการเทรนและ PPO shuffle แบบเดิม เลือก 2 หรือ 4 ก่อนกด Start เพื่อให้หลายครอบครัวทำงานพร้อมกัน (ไม่เกินจำนวนครอบครัว) ใช้ร่วมกับ View → Off ได้ Arms/Seeds แต่ละ Job ยังเรียงกัน ไม่ได้เริ่มทุก Job พร้อมกัน
+Notebook ที่สร้าง Config ผ่าน `ExperimentConfig.profile(...)` เริ่มต้น Backend **Multi-core CPU** และ **Workers 4** สำหรับเครื่อง 155H / RAM 16 GB นี้ โดยลดลงเมื่อมีครอบครัวน้อยหรือระบบเปิดให้ใช้ CPU น้อย แต่ละ Process มี Torch/SB3 runtime ของตัวเอง จึงใช้ RAM เพิ่ม เลือก 4 เป็นจุดเริ่มต้นเพื่อเผื่อ RAM ให้ Notebook และระบบ ไม่ได้อ้างว่า benchmark แล้วว่าเร็วที่สุด ไม่ล็อก affinity ว่าต้องเป็น P-core หรือ E-core ระบบปฏิบัติการเป็นผู้จัดสรร Core เอง เลือก View → Off เพื่อลดการสร้างภาพได้ หากเครื่องร้อนหรือ RAM ตึงให้ลด Workers เป็น 2 หาก RAM เหลือและวัดแล้วเร็วขึ้นจึงลอง 6 ใน Run ใหม่
 
-แต่ละ Agent ยังมีโมเดล optimizer rollout ความจำ และตัวสุ่ม Action ของตัวเอง ไม่รวมประสบการณ์ข้ามครอบครัว ไม่เปลี่ยน reward จำนวนวัน จังหวะอัปเดต PPO fitness หรือการคัดเลือก เมื่อใช้ Threads > 1 ระบบเปลี่ยน PPO shuffle เป็น `per_agent` และเซฟสถานะตัวสุ่มนี้ใน checkpoint เพื่อไม่ให้ลำดับ thread แย่งใช้ NumPy RNG ร่วมกัน นี่ต่างจาก RNG ของ Run เก่า จึงไม่รับประกันว่า Seed เดิมให้ผลเท่าเดิม หากต้องการเทียบ serial/thread โดยใช้ระบบสุ่มเดียวกัน ให้ตั้ง `CONFIG.ppo_shuffle_rng = "per_agent"` แล้วเทียบ Threads 1 กับ 2 บนอุปกรณ์เดียวกัน
+แต่ละ Process ทำงานได้ข้ามข้อจำกัด Python GIL มีโมเดล optimizer rollout ความจำ และ RNG ของ Agent แยกกันทั้งหมด ใช้ `spawn` ทั้ง Windows และ Linux และจำกัด PyTorch/BLAS ที่ 1 thread ต่อ Process ลดการแย่ง Core โมเดลอยู่ใน worker ตลอดช่วง care ไม่ส่งน้ำหนักทุก Step ส่งเฉพาะ Progress และ snapshot ภาพทุก `process_chunk_steps` (ปริยาย 128 joint steps ต่อครอบครัว) ตัวเลขนี้ควบคุมการรายงานและจุดพัก ไม่เปลี่ยนขอบเขต PPO rollout หรือการอัปเดตน้ำหนัก
 
-Worker ทำครั้งละไม่เกิน 16 joint steps ต่อครอบครัว แล้วรอให้ทุกงานในรอบเสร็จก่อนอัปเดต Progress, Pause, Stop & save หรือเข้า assessment การเซฟไม่มี worker ค้างแก้โมเดลอยู่ Resume ใช้จำนวน Threads และตัวสุ่มจาก config ของ Run นั้น การตรวจ fitness และ Zero-shot ยังรันเรียงกันเพื่อคงการประเมินแยกจากการเทรน
+Pause/Stop ระหว่างฝึกรอให้ทุก worker ในรอบปัจจุบันเสร็จ จากนั้นย้าย world, policy, optimizer, rollout ที่ยังไม่เต็ม และสถานะ RNG กลับ coordinator ก่อนเซฟ Resume สร้าง Processes ใหม่และโหลดสถานะเหล่านั้น หาก worker ล้มเหลวหรือไม่ตอบสนองจะแสดง error ไม่เซฟสถานะที่เก็บมาไม่ครบ และไม่ลองเทรนใหม่อัตโนมัติ เฉพาะ coordinator เขียนไฟล์ Run Fitness ที่ใช้คัดเลือกและ Arms/Seeds แต่ละ Job ยังรันเรียงกัน ส่วน Zero-shot กระจายตามกรณีดังต่อไปนี้
+
+### Zero-shot แบบ Multi-core
+
+Backend Multi-core CPU ใช้ Workers เดียวกันกระจายกรณี Zero-shot ในแต่ละ phase (A0/A1/A2) อัตโนมัติ แต่ phase ยังเรียงกัน กรณีทดสอบและการตรวจ self-care ที่ประกอบผล Zero-shot ใช้ CPU process แยก ใช้สำเนาซึ่งแยกจากโมเดลฝึก ตรึงน้ำหนัก เริ่มความจำใหม่ และใช้ scenario/action seeds เดียวกับ Serial ทุกกรณี ไม่เพิ่ม gradient, PPO update หรือการเรียนรู้ใด ๆ ไม่เปลี่ยนข้อสอบหรืออายุการทดสอบ (ยังเต็ม 20 วัน/4,000 Steps ตาม Config)
+
+coordinator เก็บ CSV ตามลำดับ candidate/scenario/seed/intervention/policy เดิม ไม่ใช้ลำดับที่งานเสร็จมาจัดผล ภาพและ Progress อัปเดตเมื่อกรณีหนึ่งจบ แสดงโลกสุดท้ายของกรณีนั้น จึงไม่ใช่ภาพสดทุก Step ขณะ Pause กรณีที่ส่งไปแล้วอาจจบใน worker แต่ไม่ส่งงานเพิ่ม Stop ส่งสัญญาณให้ worker หยุดในการตรวจ Step ถัดไป กรณีที่ทำไม่ครบไม่ถูกเขียนเป็นผลสมบูรณ์ กรณีที่คำนวณล่วงหน้าแต่ยังไม่ได้ส่งผลให้ coordinator จะถูกทิ้งเมื่อ Stop
+
+หัวข้อ 6 ประเมินเพิ่มมี Checkbox **Multi-core CPU** และช่อง **Workers** ของตัวเอง หากต้องการเทียบ Serial ใช้ `CONFIG.parallel_zero_shot = False` ก่อนสร้างหน้าฝึก หรือเอาเครื่องหมายออกในหัวข้อ 6 ไม่ต้องเปลี่ยนโมเดล มีชุดตรวจเทียบผลและการยกเลิกสำหรับรันเอง: `python -m unittest tests.test_parallel_evaluation -v` ยังไม่ได้รันทดสอบหรืออ้างว่าผลตรงกันจริงทุกบิตบนทุกเครื่อง
+
+### ลดงานคำนวณซ้ำใน D และ Zero-shot
+
+ทุกกลุ่มใช้เส้นทาง Multi-core เดียวกัน ไม่มีข้อยกเว้นให้ D ต้องรัน Serial เวลารวมอาจต่างกันมากเพราะ A/B/C ยุติเมื่อไม่มีลูกที่รอด ส่วน D เป็นกลุ่มแม่เดิมเรียนรู้ต่อเนื่อง จึงทำครบรอบที่ตั้งไว้แม้ไม่มีลูกรอด ต้องเทียบเวลาใน Phase/Generation เดียวกันและจำนวนข้อสอบที่ทำจริง ไม่ใช้เวลารวมที่ Run สูญพันธุ์เร็วมาเทียบตรง ๆ
+
+D นำโมเดลแม่และ optimizer เดิมไปใช้ในรอบถัดไปโดยไม่สร้าง PPO ใหม่เมื่อมีแม่ครบอยู่ในหน่วยความจำ หาก Resume ช่วงสร้างประชากรค้างไว้จะโหลดจาก state ตามเดิม ไม่เปลี่ยนกติการีเซ็ตสภาพร่างกาย การเรียนรู้ หรือการส่งต่อน้ำหนัก การเทรนยังใช้ `choose()` แบบเดิม
+
+Frozen evaluation ใช้ `act()` ซึ่งคงการคำนวณ actor, internal state และการสุ่ม Action เดิม แต่ข้าม critic และ log probability ที่ไม่มีการนำไปใช้ฝึก Worker เก็บโมเดลสำเนาส่วนตัวต่อ candidate/phase เพื่อลดการสร้าง PPO ซ้ำ ก่อนทุกข้อรีเซ็ต z และ Action RNG ตาม Seed เดิม ไม่มีการนำความจำหรือประสบการณ์จากข้อก่อนหน้ามาใช้ และไม่ใช้ actor เดียวกันประเมินสองข้อพร้อมกัน ยังไม่ได้ benchmark หรือรัน regression checks เพื่อยืนยันผลเทียบเดิม
+
+ไม่มีการเริ่ม worker ตอน import, เปิด Notebook หรือสร้างหน้าควบคุม เริ่มเฉพาะเมื่อผู้ใช้กด Start ไม่ต้องติดตั้งแพ็กเกจเพิ่ม หลังแก้โค้ดต้อง Restart Kernel และสร้าง Config/หน้าควบคุมใหม่ มี regression checks สำหรับรันเอง: `python -m unittest tests.test_processes -v` (มี PPO updates สั้น ๆ) ยังไม่ได้รันหรือวัดความเร็วบนเครื่องจริง
+
+## โหมด Serial และ Threads
+
+หน้าควบคุมเทรนงานเดียวและ Batch มีช่อง **Backend / Workers** เลือก Serial เพื่อใช้ลำดับเทรนเดิม หรือ Threads พร้อม Workers 2/4 เพื่อใช้หลาย thread ใน Process เดียว หากต้องการทั้งลำดับและตัวสุ่มแบบ legacy ให้สร้าง `ExperimentConfig()` และตั้ง Backend Serial, Workers 1, `ppo_shuffle_rng="legacy"` ก่อนสร้างหน้าควบคุม ส่วน Config จาก profile ใช้ตัวสุ่ม per_agent เพื่อรองรับ Multi-core
+
+ทุก Backend ไม่รวมประสบการณ์ข้ามครอบครัว ไม่เปลี่ยน reward จำนวนวัน จังหวะอัปเดต PPO fitness หรือการคัดเลือก เมื่อใช้ Processes หรือ Workers > 1 ระบบเปลี่ยน PPO shuffle เป็น `per_agent` และเซฟสถานะตัวสุ่มนี้ใน checkpoint เพื่อไม่แย่งใช้ NumPy RNG ร่วมกัน นี่ต่างจาก RNG ของ Run เก่า จึงไม่รับประกันว่า Seed เดิมให้ผลเท่าเดิม หากต้องการตรวจเทียบ Backend ให้ใช้ `CONFIG.device="cpu"` และ `CONFIG.ppo_shuffle_rng="per_agent"` เหมือนกันทุก Backend บนอุปกรณ์เดียวกันก่อนเก็บผลหลัก
+
+ใน Backend Threads Worker ทำครั้งละไม่เกิน 16 joint steps ต่อครอบครัว แล้วรอให้ทุกงานในรอบเสร็จก่อนอัปเดต Progress, Pause, Stop & save หรือเข้า assessment การเซฟไม่มี worker ค้างแก้โมเดลอยู่ Resume ใช้ Backend/Workers และตัวสุ่มจาก config ของ Run นั้น การตรวจ fitness ยังรันเรียงกัน Zero-shot ใช้ Processes เฉพาะ Backend Multi-core CPU และเปิด parallel_zero_shot
 
 Python 3.12 ยังมี GIL และ GPU มีต้นทุนรับส่งข้อมูล จึงยังไม่อ้างว่าเพิ่ม Threads แล้วเร็วขึ้น ต้องวัดบนเครื่องจริง โค้ดใหม่นี้เปลี่ยน source hashes: checkpoint จากโค้ดเก่าจะไม่ผ่าน exact-resume ให้เก็บโค้ดเดิมไว้คู่กับ Run เก่า ไม่แก้ manifest เพื่อข้ามการตรวจ เพิ่ม regression checks ไว้สำหรับรันเอง แต่ยังไม่ได้เริ่มเทรนหรือทดสอบความเท่ากันจริง
 

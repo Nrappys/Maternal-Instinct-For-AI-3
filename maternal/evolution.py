@@ -76,7 +76,7 @@ def load_checkpoint(path):
 class Experiment:
     def __init__(self, config: ExperimentConfig, output=None):
         config.validate()
-        config.device = resolve_device(config.device)
+        config.device = "cpu" if config.execution_backend == "processes" else resolve_device(config.device)
         self.config = config
         self.rng = random.Random(config.seed)
         random.seed(config.seed)
@@ -99,7 +99,10 @@ class Experiment:
                          "status": "initialized", "validated": False, "training_started": False,
                          "runtime_device": config.device,
                          "execution": {"family_workers": config.family_workers,
-                                       "ppo_shuffle_rng": config.ppo_shuffle_rng},
+                                       "ppo_shuffle_rng": config.ppo_shuffle_rng,
+                                       "backend": config.execution_backend,
+                                       "parallel_zero_shot": config.parallel_zero_shot,
+                                       "process_chunk_steps": config.process_chunk_steps},
                          "entrypoint": "Jupyter Notebook", "project": "Maternal Instinct For AI #3"}
         self._manifest()
         self.generation, self.family_index = 0, 0
@@ -129,6 +132,10 @@ class Experiment:
         return self.rng.randrange(2**31-1)
 
     def _new_generation(self, control):
+        previous_families = self.families
+        reuse_d_mothers = (self.config.arm == "D" and self.build_index == 0
+                           and self.next_adults is not None
+                           and len(previous_families) == self.config.population)
         if self.build_index == 0:
             self.families, self.starts = [], []
             self.start_bodies = []
@@ -140,7 +147,12 @@ class Experiment:
                             age_steps=self.config.world.horizon, forage=0.5, avoidance=0.3, food=1)
             else:
                 adult = self.next_adults[slot]
-                m = Learner.restore(self.config, adult["learner"])
+                if reuse_d_mothers:
+                    # D retains these exact mothers, not just their genomes.
+                    # Reuse model/optimizer allocations instead of rebuilding PPO.
+                    m = previous_families[slot].mother
+                else:
+                    m = Learner.restore(self.config, adult["learner"])
                 if self.config.arm != "D":
                     # Branches retain experience, but must not share identical action RNG streams.
                     branch_seed = self._seed()
@@ -184,9 +196,9 @@ class Experiment:
         self.build_index = 0
         self.phase = "care"
 
-    def _progress(self, callback, world=None, label="Learning", fraction=0):
+    def _progress(self, callback, world=None, label="Learning", fraction=0, snapshot=None, z_mother=None):
         selected = min(self.watched_family, len(self.families)-1)
-        if world is None and self.families:
+        if world is None and self.families and snapshot is None:
             world = self.families[max(0, selected)].world
         completed_care = self.joint_steps/(self.config.population*self.config.world.horizon)
         within = min(1, max(0, completed_care-self.generation))
@@ -210,7 +222,10 @@ class Experiment:
                    "joint_steps": self.joint_steps, "agent_transitions": self.agent_transitions,
                    "output": str(self.output), "arm": self.config.arm,
                    "checkpoint": self.last_checkpoint, "unique": self.unique_candidates}
-        if world is not None:
+        if snapshot is not None:
+            payload["world"] = snapshot
+            payload["z_mother"] = z_mother
+        elif world is not None:
             payload["world"] = world.snapshot()
             if self.families and world is self.families[max(0, selected)].world:
                 family = self.families[max(0, selected)]
@@ -247,27 +262,8 @@ class Experiment:
 
     def _family_chunk(self, index):
         """One worker owns one family for 16 joint steps; no shared RNG or I/O."""
-        family = self.families[index]
-        world = family.world
-        steps = transitions = 0
-        for _ in range(min(16, self.config.world.horizon - world.t)):
-            observations = [world.observation(0), world.observation(1)]
-            bodies = (world.mother, world.child)
-            living = [body.alive for body in bodies]
-            choices = [learner.choose(obs) if alive else (int(Action.WAIT), None)
-                       for learner, obs, alive in zip((family.mother, family.child), observations, living)]
-            rewards, boundary = world.step((choices[0][0], choices[1][0]))
-            for who, learner in enumerate((family.mother, family.child)):
-                if living[who]:
-                    terminal = not bodies[who].alive or (boundary and who == 0)
-                    learner.record(choices[who][1], rewards[who], world.observation(who),
-                                   terminal, learn=self.config.arm != "C", flush=boundary)
-                    transitions += 1
-            steps += 1
-        if world.t == self.config.world.horizon:
-            family.mother.end_context()
-            family.child.end_context()
-        return steps, transitions
+        from .parallel import advance_family
+        return advance_family(self.families[index], self.config, 16)
 
     def _care_parallel(self, callback, control):
         if self.config.ppo_shuffle_rng != "per_agent":
@@ -290,6 +286,39 @@ class Experiment:
                 self._progress(callback, label=f"Lifetime learning · {workers} threads" if self.config.arm != "C"
                                else f"Frozen policy · {workers} threads")
 
+    def _care_processes(self, callback, control):
+        from .parallel import ProcessFamilies
+
+        control()
+        self._progress(callback, label="Starting CPU processes · loading independent families")
+        with ProcessFamilies(self.config, self.families) as pool:
+            try:
+                while True:
+                    control()
+                    results = pool.advance()
+                    self.joint_steps += sum(row["steps"] for row in results)
+                    self.agent_transitions += sum(row["transitions"] for row in results)
+                    frames = sorted((frame for row in results for frame in row["frames"]),
+                                    key=lambda frame: frame["index"])
+                    selected = next((frame for frame in frames if not frame["done"]), frames[0])
+                    self.family_index = self.watched_family = selected["index"]
+                    label = "Lifetime learning" if self.config.arm != "C" else "Frozen policy"
+                    self._progress(callback, label=f"{label} · {pool.count} CPU processes",
+                                   snapshot=selected["world"], z_mother=selected["z_mother"])
+                    if all(frame["done"] for frame in frames):
+                        break
+            finally:
+                # Only a completed round can be copied back for checkpointing.
+                # StopRequested propagates after restoring every live learner.
+                if pool.consistent:
+                    states = sorted(pool.snapshot(), key=lambda row: row["index"])
+                    if [row["index"] for row in states] != list(range(len(self.families))):
+                        raise RuntimeError("Family process snapshot is incomplete")
+                    self.families = [Family(row["world"], Learner.restore(self.config, row["mother"]),
+                                            Learner.restore(self.config, row["child"])) for row in states]
+                    self.family_index = next((i for i, family in enumerate(self.families)
+                                              if family.world.t < self.config.world.horizon), len(self.families))
+
     def run(self, callback=lambda frame: None, control=lambda: None):
         if self.phase == "finished":
             status = "extinct" if not self.candidates and self.config.arm != "D" else "completed"
@@ -304,7 +333,9 @@ class Experiment:
                     self._progress(callback, label="Building independent agents")
                     self._new_generation(control)
                 if self.phase == "care":
-                    if self.config.family_workers > 1:
+                    if self.config.execution_backend == "processes":
+                        self._care_processes(callback, control)
+                    elif self.config.execution_backend == "threads" and self.config.family_workers > 1:
                         self._care_parallel(callback, control)
                     else:
                         self._care_serial(callback, control)
@@ -437,7 +468,7 @@ class Experiment:
             raise ValueError("Source files changed since checkpoint; exact resume is refused. Keep a matching source copy.")
         obj = cls.__new__(cls)
         obj.config = ExperimentConfig.from_dict(payload["config"])
-        obj.config.device = resolve_device()
+        obj.config.device = "cpu" if obj.config.execution_backend == "processes" else resolve_device()
         # The checkpoint's current location is authoritative after moving a run.
         obj.output = path.parent.parent
         if path.parent.name != "models" or not all((obj.output/name).is_file() for name in ("manifest.json", "config.json")):
@@ -446,7 +477,8 @@ class Experiment:
         disk_config = json.loads((obj.output/"config.json").read_text(encoding="utf-8"))
         if (obj.manifest.get("source_hashes") != payload["source_hashes"]
                 or any(disk_config.get(key) != payload["config"].get(key)
-                       for key in ("arm", "seed", "population", "generations", "world", "ppo", "family_workers", "ppo_shuffle_rng"))):
+                       for key in ("arm", "seed", "population", "generations", "world", "ppo", "family_workers",
+                                   "ppo_shuffle_rng", "execution_backend", "process_chunk_steps", "parallel_zero_shot"))):
             raise ValueError("Checkpoint does not match the surrounding run manifest/config")
         obj.manifest["resumed_from_output"] = payload.get("output")
         obj.manifest["runtime_device"] = obj.config.device

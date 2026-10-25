@@ -69,8 +69,8 @@ def fitness_probe(learner, body, config, control=lambda: None, on_step=lambda: N
     return sum(scores)/len(scores)
 
 
-EVALUATION_PROTOCOL = "full_lifetime_care_v4_growing_child"
-CARE_POLICIES = ("learned", "no_help", "appropriate_help", "always_help")
+EVALUATION_PROTOCOL = "full_lifetime_care_v5_care_dependent_growth"
+CARE_POLICIES = ("learned", "no_help", "light_help", "appropriate_help", "always_help")
 
 
 def evaluation_config(payload):
@@ -217,6 +217,14 @@ def care_action(learner, world, intervention, care_policy):
     if not world.mother.alive:
         return Action.WAIT
     if care_policy == "no_help":
+        return demo_action(world, 0, "self_only")
+    if care_policy == "light_help":
+        # Brief, intermittent availability: first quarter-day every four days.
+        # No cap on survival and no synthetic damage: missed needs act normally.
+        day_step = world.t % world.config.steps_per_day
+        available = (world.t // world.config.steps_per_day) % 4 == 0
+        if available and day_step < max(1, world.config.steps_per_day // 4):
+            return reference_mother_action(world)
         return demo_action(world, 0, "self_only")
     if care_policy == "appropriate_help":
         return reference_mother_action(world)
@@ -513,7 +521,7 @@ def a0_report(run_directories, destination, split="monitor", skills="matched"):
         fig, axes = plt.subplots(1, len(metrics), figsize=(4*len(metrics), 3.8), constrained_layout=True)
         for axis, metric in zip(axes, metrics):
             for arm in sorted({identity[0] for identity, _ in runs}):
-                for policy, style in zip(CARE_POLICIES, ("-", "--", "-.", ":")):
+                for policy, style in zip(CARE_POLICIES, ("-", "--", "-.", ":", (0, (3, 1, 1, 1)))):
                     generations = sorted({int(r["generation"]) for identity, rows in runs if identity[0] == arm for r in rows})
                     x, means, lows, highs = [], [], [], []
                     for generation in generations:

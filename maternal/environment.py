@@ -167,7 +167,9 @@ class FamilyWorld:
         if day < self.config.early_child_days:
             return False
         if day < self.config.late_child_day:
-            return self.mother.alive and distance(body.pos, self.mother.pos) <= 1
+            # Presence alone is not care: the caregiver must actively offer help.
+            return (self.mother.alive and distance(body.pos, self.mother.pos) <= 1
+                    and self.mother.signal == "offer" and self.mother.signal_until > self.t)
         return True
 
     def food_access_stage(self, body):
@@ -189,8 +191,10 @@ class FamilyWorld:
             self.config.late_gather_interval - self.config.mature_gather_interval))
 
     def move_interval(self, body):
-        interval = 1 if body.role == "mother" else (3 if self.age_day(body) < self.config.early_child_days else
-                                                  (2 if self.age_day(body) < self.config.late_child_day else 1))
+        interval = 1 if body.role == "mother" else (
+            self.config.infant_move_interval if self.age_day(body) < self.config.early_child_days else
+            self.config.juvenile_move_interval if self.age_day(body) < self.config.late_child_day else
+            self.config.late_move_interval)
         return interval + int(body.fatigue > 85)
 
     @property
@@ -612,6 +616,9 @@ def reference_mother_action(world: FamilyWorld):
     if approaching_danger and not danger:
         return Action.WARN if distance(mother.pos, child.pos) <= world.config.hearing else path_action(world, mother.pos, child.pos)
     can_eat_alone = world.skill_cap(child) > 0 and child.food > 0
+    if (world.food_access_stage(child) == "supervised" and child.energy < 50 and not can_eat_alone
+            and near and child.pos in world.food_sites and not world.carried):
+        return Action.OFFER
     needs_food = (child.energy < (30 if world.food_access_stage(child) == "independent" else 50)
                   and not can_eat_alone)
     if needs_food and mother.food:

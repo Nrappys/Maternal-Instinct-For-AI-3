@@ -61,7 +61,7 @@ class ParallelEvaluation(unittest.TestCase):
     def test_serial_and_process_rows_order_step_counts_and_frozen_parent_match(self):
         import torch
         from maternal.agent import Learner
-        from maternal.evaluation import evaluate_phase, SCENARIOS
+        from maternal.evaluation import evaluate_phase, SCENARIOS, CARE_POLICIES
 
         config = self.config()
         learner = Learner(config, 41)
@@ -80,7 +80,7 @@ class ParallelEvaluation(unittest.TestCase):
                                        progress=lambda world, fraction: frames.append((world.t, fraction)),
                                        on_step=lambda: count(1)))
         self.assertEqual(serial, parallel)
-        self.assertEqual(len(parallel), len(SCENARIOS) * 4)
+        self.assertEqual(len(parallel), len(SCENARIOS) * len(CARE_POLICIES))
         self.assertEqual(counts, [len(parallel) * 8 + 4] * 2)
         self.assertEqual(frames[-1], (8, 1.0))
         self.assertTrue(all(row["memory_reset"] and not row["learning_enabled"] for row in parallel))

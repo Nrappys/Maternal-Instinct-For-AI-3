@@ -278,7 +278,7 @@ class BalancePanel(_Panel):
         from .evaluation import SCENARIOS, run_scenario, EVALUATION_PROTOCOL
         config = copy.deepcopy(self.config)
         config.validate()
-        policies = ("no_help", "appropriate_help", "always_help")
+        policies = ("no_help", "light_help", "appropriate_help", "always_help")
         scenarios = ("ordinary", "mother_loss", *SCENARIOS)
         jobs = [(scenario, seed, policy) for scenario in scenarios
                 for seed in range(config.eval_seeds) for policy in policies]
@@ -325,7 +325,7 @@ class BalancePanel(_Panel):
             writer = csv.DictWriter(handle, fieldnames=list(summary[0]))
             writer.writeheader(); writer.writerows(summary)
         metadata["status"] = "completed"
-        metadata["interpretation"] = "Inspect appropriate_help vs no_help and always_help. These scripted references are not optimal policies or proof of global feasibility."
+        metadata["interpretation"] = "Compare no_help, intermittent light_help, appropriate_help and always_help by survival AND stage-specific health. Light help is available for one quarter-day every four days. Do not assume calibration before inspecting results."
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         self._emit({"kind": "frame", "overall": 1})
         self._emit({"kind": "done", "status": "Balance check completed · inspect summary.csv before training", "output": str(destination)})

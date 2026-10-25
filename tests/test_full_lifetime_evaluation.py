@@ -86,6 +86,7 @@ class FullLifetimeEvaluation(unittest.TestCase):
     def test_age_gates_share_the_same_configured_boundaries(self):
         config = ExperimentConfig.profile()
         world = scenario_world(config, "ordinary", 0, Body("mother"))
+        world.mother.signal, world.mother.signal_until = "offer", 20
         for age, cap in ((config.world.early_child_days-1, 0),
                          (config.world.early_child_days, .6), (config.world.late_child_day, 1)):
             world.child.age_steps = age*config.world.steps_per_day
@@ -123,6 +124,8 @@ class FullLifetimeEvaluation(unittest.TestCase):
         world.step((Action.WAIT, Action.GATHER))
         self.assertEqual(world.child.food, 0)
         world.mother.pos = world.child.pos
+        self.assertFalse(world.can_gather(world.child))
+        world.step((Action.OFFER, Action.WAIT))
         world.step((Action.WAIT, Action.GATHER))
         self.assertEqual(world.child.food, 1)
         self.assertEqual(world.stats["child_supervised_gathers"], 1)
@@ -184,10 +187,12 @@ class FullLifetimeEvaluation(unittest.TestCase):
         world = FamilyWorld()
         world.child.age_steps = world.config.early_child_days*world.config.steps_per_day
         world.child.pos = world.mother.pos = next(iter(world.food_sites))
+        world.step((Action.OFFER, Action.WAIT))
         world.step((Action.WAIT, Action.GATHER))
         world.step((Action.WAIT, Action.GATHER))
         self.assertEqual(world.child.food, 1)
-        world.t = world.config.juvenile_gather_interval
+        world.t = world.child.last_gather + world.config.juvenile_gather_interval
+        world.step((Action.OFFER, Action.WAIT))
         world.step((Action.WAIT, Action.GATHER))
         self.assertEqual(world.child.food, 2)
         world.child.age_steps = world.config.late_child_day*world.config.steps_per_day
@@ -199,8 +204,47 @@ class FullLifetimeEvaluation(unittest.TestCase):
         from maternal.config import ROOT, OUTPUT_ROOT, PROTOCOL
         from maternal.evaluation import EVALUATION_PROTOCOL
         self.assertEqual(OUTPUT_ROOT, ROOT/"outputs"/"2_model")
-        self.assertEqual(PROTOCOL, "maternal-house-v2.3-growing-child")
-        self.assertEqual(EVALUATION_PROTOCOL, "full_lifetime_care_v4_growing_child")
+        self.assertEqual(PROTOCOL, "maternal-house-v2.4-care-dependent-growth")
+        self.assertEqual(EVALUATION_PROTOCOL, "full_lifetime_care_v5_care_dependent_growth")
+
+    def test_child_moves_slowly_by_age_while_mother_speed_is_unchanged(self):
+        from maternal.environment import FamilyWorld
+        world = FamilyWorld()
+        for age, expected in ((0, 5), (7, 3), (14, 1)):
+            world.child.age_steps = age*world.config.steps_per_day
+            self.assertEqual(world.move_interval(world.child), expected)
+        self.assertEqual(world.move_interval(world.mother), 1)
+        world.child.age_steps = 0
+        world.step((Action.WAIT, Action.NORTH))
+        first = world.child.pos
+        for _ in range(4):
+            world.step((Action.WAIT, Action.NORTH))
+            self.assertEqual(world.child.pos, first)
+        world.step((Action.WAIT, Action.NORTH))
+        self.assertNotEqual(world.child.pos, first)
+
+    def test_no_help_does_not_unlock_supervised_food_by_presence_alone(self):
+        from maternal.environment import FamilyWorld
+        from maternal.evaluation import care_action
+        world = FamilyWorld()
+        world.child.age_steps = 7*world.config.steps_per_day
+        world.child.pos = world.mother.pos = next(iter(world.food_sites))
+        self.assertFalse(world.can_gather(world.child))
+        world.step((care_action(None, world, "normal", "no_help"), Action.GATHER))
+        self.assertEqual(world.child.food, 0)
+
+    def test_light_help_is_intermittent_and_not_a_learned_model(self):
+        from unittest.mock import patch
+        from maternal.environment import FamilyWorld
+        from maternal.evaluation import care_action, CARE_POLICIES
+        self.assertIn("light_help", CARE_POLICIES)
+        world = FamilyWorld()
+        with patch("maternal.evaluation.reference_mother_action", return_value=Action.FEED), \
+             patch("maternal.evaluation.demo_action", return_value=Action.REST):
+            for step, expected in ((0, Action.FEED), (49, Action.FEED), (50, Action.REST),
+                                   (799, Action.REST), (800, Action.FEED)):
+                world.t = step
+                self.assertEqual(care_action(None, world, "normal", "light_help"), expected)
 
     def test_scheduled_mother_loss_is_a_separate_reference_check(self):
         self.assertNotIn("mother_loss", SCENARIOS)
